@@ -176,6 +176,11 @@ endif
 UEXTRA=
 ifeq ($(LAB),util)
 	UEXTRA += user/xargstest.sh
+	UPROGS += user/_sleep
+	UPROGS += user/_pingpong
+	UPROGS += user/_primes
+	UPROGS += user/_find
+	UPROGS += user/_xargs
 endif
 
 fs.img: mkfs/mkfs README $(UEXTRA) $(UPROGS)
