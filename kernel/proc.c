@@ -21,27 +21,30 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-// initialize the proc table at boot time.
-void
-procinit(void)
-{
-  struct proc *p;
-  
-  initlock(&pid_lock, "nextpid");
-  for(p = proc; p < &proc[NPROC]; p++) {
-      initlock(&p->lock, "proc");
+// declarations for functions from vm.c (will be in defs.h eventually)
+extern pagetable_t kvmmake(void);
+extern void free_kernel_pagetable(pagetable_t);
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
-  }
-  kvminithart();
+extern pagetable_t kernel_pagetable;
+
+uint64 global_kstack_pa[NCPU];
+
+// initialize the proc table at boot time.
+void procinit(void) {
+    struct proc *p;
+    initlock(&pid_lock, "nextpid");
+    for(p = proc; p < &proc[NPROC]; p++) {
+        initlock(&p->lock, "proc");
+        char *pa = kalloc();
+        if(pa == 0) panic("kalloc");
+        int idx = (int)(p - proc);
+        if (idx < NCPU) {
+            global_kstack_pa[idx] = (uint64)pa;
+        }
+        uint64 va = KSTACK(idx);
+        kvmmap(kernel_pagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    }
+    kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -113,6 +116,27 @@ found:
     return 0;
   }
 
+  // create kernel page table for this process
+  p->kpgtbl = kvmmake();
+  if(p->kpgtbl == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // allocate and map kernel stack for this process
+  char *pa = kalloc();
+  if(pa == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  // 使用不与全局栈冲突的虚拟地址（位于用户地址之上，内核地址之下）
+  uint64 va = 0x40000000 + (p->pid * 2 * PGSIZE);  // 每个进程占2页（含guard page）
+  kvmmap(p->kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+  p->kstack_pa = (uint64)pa;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -142,6 +166,18 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  // free kernel page table
+  if(p->kpgtbl){
+    free_kernel_pagetable(p->kpgtbl);
+    p->kpgtbl = 0;
+  }
+  // free kernel stack physical page
+  if(p->kstack_pa){
+    kfree((void*)p->kstack_pa);
+    p->kstack_pa = 0;
+  }
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -473,7 +509,16 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // switch to this process's kernel page table
+        w_satp(MAKE_SATP(p->kpgtbl));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        // restore global kernel page table when returning to scheduler
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
