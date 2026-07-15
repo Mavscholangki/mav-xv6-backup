@@ -181,6 +181,12 @@ int             copyinstr(pagetable_t, char *, uint64, uint64);
 void            vmprint(pagetable_t);
 pagetable_t     kvmmake(void);
 void            free_kernel_pagetable(pagetable_t);
+void            u2kvmcopy(pagetable_t, pagetable_t, uint64, uint64);
+void            kvmclear_user(pagetable_t, uint64, uint64);
+
+// vmcopyin.c
+int             copyin_new(pagetable_t, char *, uint64, uint64);
+int             copyinstr_new(pagetable_t, char *, uint64, uint64);
 
 // plic.c
 void            plicinit(void);

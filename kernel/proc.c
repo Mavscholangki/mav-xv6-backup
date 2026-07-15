@@ -264,6 +264,8 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  // copy user mappings to kernel page table
+  u2kvmcopy(p->kpgtbl, p->pagetable, 0, p->sz);
   p->state = RUNNABLE;
 
   release(&p->lock);
@@ -279,13 +281,21 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if (sz + n > PLIC) return -1;
+
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    // 添加新映射到内核页表
+    u2kvmcopy(p->kpgtbl, p->pagetable, p->sz, sz);
+    p->sz = sz;
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    uint64 oldsz = p->sz;
+    sz = uvmdealloc(p->pagetable, p->sz, p->sz + n);
+    // 清除内核页表中被释放的部分
+    kvmclear_user(p->kpgtbl, sz, oldsz);
+    p->sz = sz;
   }
-  p->sz = sz;
   return 0;
 }
 
@@ -329,6 +339,8 @@ fork(void)
 
   pid = np->pid;
 
+  // copy user mappings to child's kernel page table
+  u2kvmcopy(np->kpgtbl, np->pagetable, 0, np->sz);
   np->state = RUNNABLE;
 
   release(&np->lock);

@@ -4,6 +4,7 @@
 #include "defs.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "memlayout.h"
 
 //
 // This file contains copyin_new() and copyinstr_new(), the
@@ -33,8 +34,10 @@ copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 
   if (srcva >= p->sz || srcva+len >= p->sz || srcva+len < srcva)
     return -1;
+  if (srcva + len > CLINT)   // 不允许访问高于 CLINT 的地址
+    return -1;
   memmove((void *) dst, (void *)srcva, len);
-  stats.ncopyin++;   // XXX lock
+  stats.ncopyin++;
   return 0;
 }
 
@@ -48,8 +51,9 @@ copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   struct proc *p = myproc();
   char *s = (char *) srcva;
   
-  stats.ncopyinstr++;   // XXX lock
+  stats.ncopyinstr++;
   for(int i = 0; i < max && srcva + i < p->sz; i++){
+    if (srcva + i >= CLINT) return -1; // 超出限制
     dst[i] = s[i];
     if(s[i] == '\0')
       return 0;

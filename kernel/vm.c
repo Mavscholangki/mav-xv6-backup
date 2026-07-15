@@ -149,6 +149,45 @@ kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)  // MOD
     panic("kvmmap");
 }
 
+// Copy user page table mappings from upgtbl to kernel page table kpgtbl
+// for virtual addresses [start, end).  start and end should be page-aligned.
+void
+u2kvmcopy(pagetable_t kpgtbl, pagetable_t upgtbl, uint64 start, uint64 end)
+{
+  pte_t *pte;
+  uint64 pa, va;
+  uint flags;
+  for (va = PGROUNDUP(start); va < end; va += PGSIZE) {
+    if (va >= CLINT) break;   // 不映射高于或等于 CLINT 的地址
+    if ((pte = walk(upgtbl, va, 0)) == 0)
+      continue;
+    if ((*pte & PTE_V) == 0)
+      continue;
+    if ((*pte & (PTE_R | PTE_W | PTE_X)) == 0)
+      continue;
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte) & ~PTE_U;
+    if (mappages(kpgtbl, va, PGSIZE, pa, flags) != 0)
+      panic("u2kvmcopy: mappages");
+  }
+}
+
+// Remove user mappings from kernel page table for [start, end)
+void
+kvmclear_user(pagetable_t kpgtbl, uint64 start, uint64 end)
+{
+  pte_t *pte;
+  start = PGROUNDUP(start);
+  end = PGROUNDUP(end);
+  for (uint64 va = start; va < end; va += PGSIZE) {
+    if ((pte = walk(kpgtbl, va, 0)) == 0)
+      continue;  // not mapped, skip
+    if (*pte & PTE_V) {
+      *pte = 0;   // just clear, don't free physical page
+    }
+  }
+}
+
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
@@ -415,23 +454,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
-
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
-
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -441,40 +464,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
-
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
-
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
-
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+  return copyinstr_new(pagetable, dst, srcva, max);
 }
 
 // 递归打印页表，depth 表示当前层级（0=顶层，1=中间，2=底层）
