@@ -70,6 +70,7 @@ sys_sleep(void)
     sleep(&ticks, &tickslock);
   }
   release(&tickslock);
+  backtrace();
   return 0;
 }
 
@@ -94,4 +95,36 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_sigalarm(void)
+{
+    int interval;
+    uint64 handler;
+    if (argint(0, &interval) < 0)
+        return -1;
+    if (argaddr(1, &handler) < 0)
+        return -1;
+    struct proc *p = myproc();
+    p->alarm_interval = interval;
+    p->alarm_handler = handler;
+    p->alarm_ticks_left = interval;
+    return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  
+  // 只有在 handler 执行期间才恢复
+  if (p->alarm_in_handler) {
+    // 恢复被中断时的完整 trapframe（包括所有寄存器、epc 等）
+    *p->trapframe = *p->alarm_trapframe;
+    // 清除标记，允许下次再触发
+    p->alarm_in_handler = 0;
+  }
+  
+  return 0;  // 返回值会被恢复的 a0 覆盖，无所谓
 }

@@ -66,7 +66,23 @@ usertrap(void)
 
     syscall();
   } else if((which_dev = devintr()) != 0){
-    // ok
+    // 如果是时钟中断
+    if (which_dev == 2) {
+        struct proc *p = myproc();
+        if (p != 0 && p->alarm_interval > 0 && p->alarm_in_handler == 0) {
+            p->alarm_ticks_left--;
+            if (p->alarm_ticks_left == 0) {
+                // 保存当前 trapframe（用户态上下文）
+                *p->alarm_trapframe = *p->trapframe;
+                // 设置用户态 pc 为 handler 地址
+                p->trapframe->epc = p->alarm_handler;
+                // 标记正在处理
+                p->alarm_in_handler = 1;
+                // 重置剩余 ticks
+                p->alarm_ticks_left = p->alarm_interval;
+            }
+        }
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

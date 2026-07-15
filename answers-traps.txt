@@ -1,0 +1,34 @@
+1. Which registers contain arguments to functions? For example, which register holds 13 in main's call to printf?
+   RISC-V 的函数参数使用 a0～a7 寄存器传递。
+   在 main 调用 printf 时，第一个参数是格式字符串（地址），放在 a0 中；
+   第二个参数（即数值 13）作为第一个非格式参数，放在 a1 中。
+
+2. Where is the call to function f in the assembly code for main? Where is the call to g? (Hint: the compiler may inline functions.)
+   编译器将 g 内联到 f 中，再将 f 内联到 main 中，
+   因此在 main 的汇编代码中没有显式的 call f 或 call g 指令。
+   main 直接计算出 12+3=15，并将结果作为参数传递给 printf。
+
+3. At what address is the function printf located?
+   在 user/call.asm 中，printf 的地址通常由链接器决定，
+   例如在示例输出中可见为 0x0000000000000630
+   （具体数值取决于编译和链接，但可在 .asm 文件中通过标签 printf 找到）。
+   在 main 中对应的 jalr 指令会跳转到该地址。
+
+4. What value is in the register ra just after the jalr to printf in main?
+   jalr 指令将返回地址（即下一条指令的 PC 值）保存在 ra 中。
+   具体数值等于 jalr 指令的地址 + 4，即 main 中调用 printf 之后那条指令的地址。
+
+5. Run the following code.
+   unsigned int i = 0x00646c72;
+   printf("H%x Wo%s", 57616, &i);
+   What is the output? Here's an ASCII table that maps bytes to characters.
+   The output depends on that fact that the RISC-V is little-endian. If the RISC-V were instead big-endian what would you set i to in order to yield the same output? Would you need to change 57616 to a different value?
+   在 RISC-V（小端序）中，0x00646c72 在内存中按字节存储为 72 6c 64 00，对应 ASCII 字符 'r'、'l'、'd'、'\0'，因此字符串为 "rld"。57616 的十六进制为 0xE110，所以 %x 输出 "e110"。最终输出为 "He110 World"。
+   若系统为大端序，为了得到相同的字符串，i 应设为 0x726c6400（即字节序反转）。
+   57616 是数值，不涉及字节序，因此无需改变。
+
+6. In the following code, what is going to be printed after 'y='? (note: the answer is not a specific value.) Why does this happen?
+   printf("x=%d y=%d", 3);
+   由于只提供了 3 个参数（格式字符串和两个 %d 对应的值），但 %d 需要两个整数，第二个 %d 没有对应的参数，
+   因此 printf 会从寄存器（如 a3）或栈上读取一个未初始化的随机值。
+   所以 y= 后面打印的是一个不确定的垃圾值（取决于当时寄存器的内容）。
