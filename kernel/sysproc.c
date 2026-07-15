@@ -41,15 +41,30 @@ sys_wait(void)
 uint64
 sys_sbrk(void)
 {
-  int addr;
   int n;
-
+  uint64 oldsz = myproc()->sz;
+  
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
-  if(growproc(n) < 0)
+  
+  uint64 newsz = oldsz + n;
+  
+  // 检查溢出或超出最大地址
+  if(newsz > MAXVA || (n > 0 && newsz < oldsz) || (n < 0 && newsz > oldsz))
     return -1;
-  return addr;
+  
+  if(n < 0) {
+    // 缩小内存：释放从新大小到旧大小之间已映射的页
+    // 释放范围：[PGROUNDUP(newsz), PGROUNDUP(oldsz))
+    uint64 start = PGROUNDUP(newsz);
+    uint64 end = PGROUNDUP(oldsz);
+    if(start < end) {
+      uvmunmap(myproc()->pagetable, start, (end - start) / PGSIZE, 1);
+    }
+  }
+  
+  myproc()->sz = newsz;
+  return oldsz;
 }
 
 uint64
