@@ -1,0 +1,4 @@
+Why are there missing keys with 2 threads, but not with 1 thread? 
+Identify a sequence of events with 2 threads that can lead to a key being missing.
+  两个线程同时往同一个空桶插入不同键。
+  线程A读取桶头为NULL，线程B也读取为NULL，然后A插入节点，B插入节点并覆盖A，导致A的键丢失。

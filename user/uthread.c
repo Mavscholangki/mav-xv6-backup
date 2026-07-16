@@ -10,15 +10,34 @@
 #define STACK_SIZE  8192
 #define MAX_THREAD  4
 
+// 保存被调用者保存的寄存器 (callee-saved)
+struct context {
+  uint64 ra;   // 返回地址
+  uint64 sp;   // 栈指针
+  // 以下为 RISC-V 的 callee-saved 寄存器
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+};
 
 struct thread {
+  struct context context;
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
 
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
-extern void thread_switch(uint64, uint64);
+extern void thread_switch(struct context*, struct context*);
               
 void 
 thread_init(void)
@@ -56,13 +75,14 @@ thread_schedule(void)
   }
 
   if (current_thread != next_thread) {         /* switch threads?  */
-    next_thread->state = RUNNING;
-    t = current_thread;
+    struct thread *prev = current_thread;
     current_thread = next_thread;
-    /* YOUR CODE HERE
-     * Invoke thread_switch to switch from t to next_thread:
-     * thread_switch(??, ??);
-     */
+    // 如果 prev == 0，表示这是第一次调度，不需要保存旧上下文
+    if (prev == 0) {
+      thread_switch(0, &next_thread->context);
+    } else {
+      thread_switch(&prev->context, &next_thread->context);
+    }
   } else
     next_thread = 0;
 }
@@ -76,7 +96,10 @@ thread_create(void (*func)())
     if (t->state == FREE) break;
   }
   t->state = RUNNABLE;
-  // YOUR CODE HERE
+
+  // 初始化上下文
+  t->context.ra = (uint64) func;          // 返回地址设为线程函数入口
+  t->context.sp = (uint64) (t->stack + STACK_SIZE); // 栈顶（栈向下增长）
 }
 
 void 
@@ -84,6 +107,13 @@ thread_yield(void)
 {
   current_thread->state = RUNNABLE;
   thread_schedule();
+}
+
+void 
+thread_exit(void)
+{
+  current_thread->state = FREE;
+  thread_schedule();  // 切换到下一个线程，不会再回到这里
 }
 
 volatile int a_started, b_started, c_started;

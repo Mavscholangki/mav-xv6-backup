@@ -25,12 +25,24 @@ barrier_init(void)
 static void 
 barrier()
 {
-  // YOUR CODE HERE
-  //
-  // Block until all threads have called barrier() and
-  // then increment bstate.round.
-  //
-  
+    pthread_mutex_lock(&bstate.barrier_mutex);
+    
+    int cur_round = bstate.round;      // 记录当前轮次
+    bstate.nthread++;                  // 当前线程到达
+    
+    if (bstate.nthread == nthread) {
+        // 我是最后一个到达的线程
+        bstate.round++;                // 进入下一轮
+        bstate.nthread = 0;            // 重置计数器
+        pthread_cond_broadcast(&bstate.barrier_cond);
+    } else {
+        // 等待，直到轮次发生变化
+        while (bstate.round == cur_round) {
+            pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+        }
+    }
+    
+    pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
