@@ -310,29 +310,40 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
-  uint flags;
-  char *mem;
+  uint flags, oldflags;
 
-  for(i = 0; i < sz; i += PGSIZE){
+  for(i = 0; i < sz; i += PGSIZE) {
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
+    if(!(*pte & PTE_V))
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    oldflags = PTE_FLAGS(*pte);
+
+    // 对所有物理页增加引用计数（父、子共享）
+    krefinc((void*)pa);
+
+    // 根据是否为用户页决定 COW 策略
+    if(oldflags & PTE_U) {
+      // 用户页：启用 COW，清除写权限，设置 COW 标志
+      flags = (oldflags & ~PTE_W) | PTE_COW;
+    } else {
+      // 非用户页（如 guard page）：保留原标志，不启用 COW
+      flags = oldflags;
+    }
+
+    // 更新父进程的 PTE
+    *pte = PA2PTE(pa) | flags;
+
+    // 映射到子进程
+    if(mappages(new, i, PGSIZE, pa, flags) != 0) {
+      // 出错回滚：恢复父进程 PTE 并释放一次引用（kfree 会减计数）
+      *pte = PA2PTE(pa) | oldflags;
+      kfree((void*)pa);
+      return -1;
     }
   }
   return 0;
-
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
 }
 
 // mark a PTE invalid for user access.
@@ -356,14 +367,18 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
 
-  while(len > 0){
+  while(len > 0) {
     va0 = PGROUNDDOWN(dstva);
+    // 确保目标页可写（如果是 COW 页则处理）
+    if(cow_fault(pagetable, va0) != 0)
+      return -1;
+
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
     n = PGSIZE - (dstva - va0);
-    if(n > len)
-      n = len;
+    if(n > len) n = len;
     memmove((void *)(pa0 + (dstva - va0)), src, n);
 
     len -= n;
@@ -439,4 +454,37 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int cow_fault(pagetable_t pagetable, uint64 va) {
+  if(va >= MAXVA)
+    return -1;
+  va = PGROUNDDOWN(va);
+
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+  if(!(*pte & PTE_V))
+    return -1;
+  // 如果不是 COW 页，或者已经可写，则无需处理
+  if(!(*pte & PTE_COW))
+    return 0;
+  if(*pte & PTE_W)
+    return 0;   // 理论上 COW 和 W 不应同时存在
+
+  uint64 pa = PTE2PA(*pte);
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;   // 内存不足，杀死进程
+
+  memmove(mem, (char*)pa, PGSIZE);
+
+  uint64 flags = PTE_FLAGS(*pte);
+  flags &= ~PTE_COW;
+  flags |= PTE_W;
+  *pte = PA2PTE(mem) | flags;
+
+  // 减少旧页引用
+  kfree((void*)pa);
+  return 0;
 }

@@ -8,6 +8,11 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "memlayout.h"
+
+#define NPHYSPAGE ((PHYSTOP - KERNBASE) / PGSIZE)
+int refcount[NPHYSPAGE];
+struct spinlock ref_lock;
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -27,6 +32,7 @@ void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref_lock, "ref");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -51,12 +57,35 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(pa, 1, PGSIZE);
+  acquire(&ref_lock);
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  if(idx < 0 || idx >= NPHYSPAGE)
+    panic("kfree: out of range");
 
-  r = (struct run*)pa;
+  // 如果引用计数为 0，表示尚未被分配（初始化阶段）或已经被释放过，
+  // 直接放回空闲链表（初始化时允许，正常流程下不会出现）。
+  if(refcount[idx] == 0) {
+    release(&ref_lock);
+    acquire(&kmem.lock);
+    r = (struct run*)pa;
+    r->next = kmem.freelist;
+    kmem.freelist = r;
+    release(&kmem.lock);
+    return;
+  }
 
+  if(refcount[idx] < 1)
+    panic("kfree: refcount < 1");
+  refcount[idx]--;
+  if(refcount[idx] > 0) {
+    release(&ref_lock);
+    return;
+  }
+  release(&ref_lock);
+
+  // 引用计数为 0，真正释放
   acquire(&kmem.lock);
+  r = (struct run*)pa;
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -76,7 +105,21 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  if(r) {
+    acquire(&ref_lock);
+    int idx = ((uint64)r - KERNBASE) / PGSIZE;
+    refcount[idx] = 1;
+    release(&ref_lock);
+    memset((char*)r, 5, PGSIZE);  // 填充垃圾，保持原行为
+  }
   return (void*)r;
+}
+
+void
+krefinc(void *pa)
+{
+  acquire(&ref_lock);
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  refcount[idx]++;
+  release(&ref_lock);
 }
