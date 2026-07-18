@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "file.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -15,6 +19,61 @@ extern char trampoline[], uservec[], userret[];
 void kernelvec();
 
 extern int devintr();
+
+// 返回 0 表示成功，-1 表示失败
+int handle_mmap_fault(struct proc *p, uint64 va) {
+  va = PGROUNDDOWN(va);
+  
+  // 查找包含 va 的 VMA
+  struct vma *v = 0;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid && va >= p->vmas[i].start && va < p->vmas[i].end) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (v == 0) return -1;
+
+  // 计算文件偏移（假设 offset=0）
+  uint64 file_off = v->offset + (va - v->start);
+
+  // 检查权限：如果是写操作（scause=15）但映射只读，则失败
+  if (r_scause() == 15 && !(v->prot & PROT_WRITE))
+    return -1;
+
+  // 分配物理页
+  char *mem = kalloc();
+  if (mem == 0)
+    return -1;
+
+  // 从文件读取数据
+  struct inode *ip = v->file->ip;
+  ilock(ip);
+  int n = readi(ip, 0, (uint64)mem, file_off, PGSIZE);
+  iunlock(ip);
+
+  if (n < 0) {
+    kfree(mem);
+    return -1;
+  }
+  // 如果读取字节不足一页，将剩余部分置零
+  if (n < PGSIZE) {
+    memset(mem + n, 0, PGSIZE - n);
+  }
+
+  // 设置页表权限
+  int pte_flags = PTE_U | PTE_V;
+  if (v->prot & PROT_READ) pte_flags |= PTE_R;
+  if (v->prot & PROT_WRITE) pte_flags |= PTE_W;
+  // 注意：对于 MAP_SHARED 写，我们需要允许写，并且写回时依赖 D 位，但实验不强制检查D，所以直接写回所有页。
+
+  if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, pte_flags) != 0) {
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
 
 void
 trapinit(void)
@@ -65,6 +124,17 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // page fault: load (13) or store (15)
+    uint64 va = r_stval();
+    if(va >= MAXVA || va < PGROUNDDOWN(va)) {
+      p->killed = 1;
+    } else {
+      // attempt to handle mmap fault
+      if(handle_mmap_fault(p, va) != 0) {
+        p->killed = 1;
+      }
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -217,4 +287,3 @@ devintr()
     return 0;
   }
 }
-

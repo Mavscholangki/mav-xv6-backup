@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -133,6 +137,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // Initialize VMA array for mmap
+  memset(p->vmas, 0, sizeof(p->vmas));
 
   return p;
 }
@@ -282,6 +289,14 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // Copy VMA entries from parent to child
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid){
+      np->vmas[i] = p->vmas[i];
+      filedup(np->vmas[i].file);   // increment reference count for the file
+    }
+  }
+
   np->parent = p;
 
   // copy saved user registers.
@@ -343,6 +358,67 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  struct vma vmas_copy[NVMA];
+  int nvma = 0;
+
+  // Copy valid VMA entries out of proc structure
+  acquire(&p->lock);
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid){
+      vmas_copy[nvma++] = p->vmas[i];
+    }
+  }
+  release(&p->lock);
+
+  // For each mmap region: write back shared writable pages,
+  // then unmap all pages and release physical memory,
+  // then close the file.
+  for(int i = 0; i < nvma; i++){
+    struct vma *v = &vmas_copy[i];
+
+    // Write back shared writable pages
+    if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+      for(uint64 va = v->start; va < v->end; va += PGSIZE){
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V)){
+          uint64 pa = PTE2PA(*pte);
+          char *buf = kalloc();
+          if(buf){
+            memmove(buf, (char*)pa, PGSIZE);
+            uint64 off = v->offset + (va - v->start);
+            struct inode *ip = v->file->ip;
+            begin_op();
+            ilock(ip);
+            writei(ip, 0, (uint64)buf, off, PGSIZE);
+            iunlock(ip);
+            end_op();
+            kfree(buf);
+          }
+        }
+      }
+    }
+
+    // Unmap all pages and free physical memory
+    for(uint64 va = v->start; va < v->end; va += PGSIZE){
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte && (*pte & PTE_V)){
+        uint64 pa = PTE2PA(*pte);
+        kfree((void*)pa);
+        *pte = 0;   // clear PTE
+      }
+    }
+
+    // Close the file (decrease reference count)
+    fileclose(v->file);
+  }
+
+  // Mark all VMA entries as invalid
+  acquire(&p->lock);
+  for(int i = 0; i < NVMA; i++){
+    p->vmas[i].valid = 0;
+  }
+  release(&p->lock);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

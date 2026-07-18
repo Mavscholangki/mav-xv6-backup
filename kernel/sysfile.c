@@ -484,3 +484,168 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, length, offset;
+  int prot, flags, fd;
+  struct file *f;
+  struct proc *p = myproc();
+
+  // 获取系统调用参数
+  if (argaddr(0, &addr) < 0 || argaddr(1, &length) < 0 ||
+      argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+      argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0)
+    return -1;
+
+  // 本实验要求 addr 和 offset 必须为 0
+  if (addr != 0 || offset != 0)
+    return -1;
+
+  // 任何映射都需要从文件中读取数据，因此文件必须可读
+  if (f->readable == 0)
+    return -1;
+
+  // 如果是共享映射且要求写权限，则文件必须可写（因为要写回）
+  if ((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+    return -1;
+
+  // 将长度向上对齐到页边界
+  length = PGROUNDUP(length);
+  if (length == 0)
+    return -1;
+
+  // 在进程地址空间中寻找空闲区域（从 0x60000000 开始）
+  uint64 start = 0x60000000;
+  int found = 0;
+  for (uint64 try = start; try < MAXVA - length; try += PGSIZE) {
+    int overlap = 0;
+    for (int i = 0; i < NVMA; i++) {
+      if (p->vmas[i].valid) {
+        // 检查 [try, try+length) 是否与已有 VMA 重叠
+        if (!(try + length <= p->vmas[i].start || try >= p->vmas[i].end)) {
+          overlap = 1;
+          break;
+        }
+      }
+    }
+    if (!overlap) {
+      start = try;
+      found = 1;
+      break;
+    }
+  }
+  if (!found)
+    return -1;
+
+  // 分配一个空闲的 VMA 条目
+  struct vma *v = 0;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid == 0) {
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if (v == 0)
+    return -1;
+
+  // 填充 VMA
+  v->valid = 1;
+  v->start = start;
+  v->end = start + length;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->file = filedup(f);   // 增加文件引用计数，防止文件关闭
+  v->offset = 0;
+
+  return start;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, length;
+  if (argaddr(0, &addr) < 0 || argaddr(1, &length) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+  addr = PGROUNDDOWN(addr);
+  length = PGROUNDUP(length);
+  uint64 end = addr + length;
+  if (end > MAXVA || end < addr) return -1; // 溢出检查
+
+  // 遍历 VMA，找到覆盖该范围的 VMA
+  int found_vma = -1;
+  for (int i = 0; i < NVMA; i++) {
+    if (p->vmas[i].valid && addr >= p->vmas[i].start && end <= p->vmas[i].end) {
+      // 只处理从开头或结尾解除的情况
+      // 检查是否是从开头解除（addr == start）或从结尾解除（end == end）或全部
+      if (addr == p->vmas[i].start || end == p->vmas[i].end || 
+          (addr == p->vmas[i].start && end == p->vmas[i].end)) {
+        found_vma = i;
+        break;
+      }
+    }
+  }
+  if (found_vma == -1) return -1;
+
+  struct vma *v = &p->vmas[found_vma];
+  
+  // 如果是 MAP_SHARED 且可写，需要将修改写回文件
+  if ((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)) {
+    // 遍历该区域已映射的页，写入文件
+    for (uint64 va = addr; va < end; va += PGSIZE) {
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if (pte && (*pte & PTE_V)) {
+        // 读取物理地址
+        uint64 pa = PTE2PA(*pte);
+        // 分配临时内核缓冲区
+        char *buf = kalloc();
+        if (buf == 0) continue; // 或 panic
+        // 拷贝用户数据到内核
+        memmove(buf, (char*)pa, PGSIZE);
+        // 写入文件
+        uint64 file_off = v->offset + (va - v->start);
+        struct inode *ip = v->file->ip;
+        begin_op();
+        ilock(ip);
+        writei(ip, 0, (uint64)buf, file_off, PGSIZE);
+        iunlock(ip);
+        end_op();
+        kfree(buf);
+      }
+    }
+  }
+
+  // 解除映射并释放物理页（只解除该范围）
+  for (uint64 va = addr; va < end; va += PGSIZE) {
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if (pte && (*pte & PTE_V)) {
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+      *pte = 0; // 清除 PTE
+    }
+  }
+  // 刷新 TLB
+  sfence_vma();
+
+  // 更新 VMA
+  if (addr == v->start && end == v->end) {
+    // 完全解除
+    v->valid = 0;
+    fileclose(v->file);
+  } else if (addr == v->start) {
+    // 从开头解除：调整 start
+    v->start = end;
+  } else if (end == v->end) {
+    // 从末尾解除：调整 end
+    v->end = addr;
+  } else {
+    // 中间挖洞（理论上不会发生），但我们不支持，返回错误
+    return -1;
+  }
+
+  return 0;
+}
