@@ -8,6 +8,9 @@
 #include "e1000_dev.h"
 #include "net.h"
 
+static struct spinlock tx_lock;
+static struct spinlock rx_lock;
+
 #define TX_RING_SIZE 16
 static struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
 static struct mbuf *tx_mbufs[TX_RING_SIZE];
@@ -28,6 +31,10 @@ void
 e1000_init(uint32 *xregs)
 {
   int i;
+
+  initlock(&tx_lock, "e1000_tx");
+  initlock(&rx_lock, "e1000_rx");
+  memset(tx_mbufs, 0, sizeof(tx_mbufs));
 
   initlock(&e1000_lock, "e1000");
 
@@ -95,26 +102,77 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
-  
+  acquire(&tx_lock);
+
+  // 获取当前发送尾指针（硬件下次将读取的位置）
+  int idx = regs[E1000_TDT] & (TX_RING_SIZE - 1);
+
+  // 检查该描述符是否可用（硬件是否已完成之前的发送）
+  if (!(tx_ring[idx].status & E1000_TXD_STAT_DD)) {
+    release(&tx_lock);
+    return -1;   // 描述符忙，上层会释放 mbuf
+  }
+
+  // 如果该槽位还有未释放的 mbuf，释放它（理论上不应发生，但做保护）
+  if (tx_mbufs[idx]) {
+    mbuffree(tx_mbufs[idx]);
+    tx_mbufs[idx] = 0;
+  }
+
+  // 填充发送描述符
+  tx_ring[idx].addr = (uint64)m->head;
+  tx_ring[idx].length = m->len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;  // 包结束 & 报告状态
+  tx_ring[idx].status = 0;   // 清除状态（可选）
+
+  // 保存 mbuf，以便在发送完成后释放
+  tx_mbufs[idx] = m;
+
+  // 更新尾指针，通知硬件有新数据
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&tx_lock);
   return 0;
 }
 
-static void
+void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  acquire(&rx_lock);
+
+  // 当前尾指针指向最后已处理的描述符，下一个待处理的是 (RDT+1)
+  int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+  while (rx_ring[idx].status & E1000_RXD_STAT_DD) {
+    struct mbuf *m = rx_mbufs[idx];
+    if (!m) {
+      panic("e1000_recv: no mbuf");
+    }
+
+    // 设置接收到的数据长度
+    m->len = rx_ring[idx].length;
+
+    // 将数据包交给网络协议栈（net_rx 会负责最终释放 mbuf）
+    net_rx(m);
+
+    // 分配新的 mbuf 替换已用掉的
+    struct mbuf *new_m = mbufalloc(0);
+    if (!new_m) {
+      // 分配失败，无法继续接收，内核 panic（或者尝试复用旧 mbuf，但这里简单处理）
+      panic("e1000_recv: mbufalloc failed");
+    }
+    rx_mbufs[idx] = new_m;
+    rx_ring[idx].addr = (uint64)new_m->head;
+    rx_ring[idx].status = 0;   // 清除状态，使硬件可以再次使用
+
+    // 更新 RDT 为当前已处理的描述符索引
+    regs[E1000_RDT] = idx;
+
+    // 移动到下一个描述符
+    idx = (idx + 1) % RX_RING_SIZE;
+  }
+
+  release(&rx_lock);
 }
 
 void
