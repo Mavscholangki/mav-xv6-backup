@@ -3,6 +3,7 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -12,6 +13,15 @@
 #define BACK  5
 
 #define MAXARGS 10
+
+#define BLOCK 6
+
+struct blockcmd {
+    int type;
+    struct cmd *cmd;
+};
+
+int interactive = 1;  // 是否交互，默认交互式
 
 struct cmd {
   int type;
@@ -126,6 +136,10 @@ runcmd(struct cmd *cmd)
     if(fork1() == 0)
       runcmd(bcmd->cmd);
     break;
+  
+  case BLOCK:
+    runcmd(((struct blockcmd*)cmd)->cmd);
+    break;
   }
   exit(0);
 }
@@ -133,7 +147,8 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  fprintf(2, "$ ");
+  if(interactive)
+    fprintf(2, "$ ");
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -146,6 +161,11 @@ main(void)
 {
   static char buf[100];
   int fd;
+
+  struct stat st;
+  if (fstat(0, &st) == 0 && st.type != T_DEVICE) {
+      interactive = 0;
+  }
 
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
@@ -400,6 +420,7 @@ struct cmd*
 parseblock(char **ps, char *es)
 {
   struct cmd *cmd;
+  struct blockcmd *bcmd;
 
   if(!peek(ps, es, "("))
     panic("parseblock");
@@ -409,7 +430,13 @@ parseblock(char **ps, char *es)
     panic("syntax - missing )");
   gettoken(ps, es, 0, 0);
   cmd = parseredirs(cmd, ps, es);
-  return cmd;
+
+  // 包装成 blockcmd
+  bcmd = malloc(sizeof(*bcmd));
+  memset(bcmd, 0, sizeof(*bcmd));
+  bcmd->type = BLOCK;
+  bcmd->cmd = cmd;
+  return (struct cmd*)bcmd;
 }
 
 struct cmd*
@@ -487,6 +514,10 @@ nulterminate(struct cmd *cmd)
   case BACK:
     bcmd = (struct backcmd*)cmd;
     nulterminate(bcmd->cmd);
+    break;
+
+  case BLOCK:
+    nulterminate(((struct blockcmd*)cmd)->cmd);
     break;
   }
   return cmd;
