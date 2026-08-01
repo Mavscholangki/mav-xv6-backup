@@ -252,19 +252,26 @@ userinit(void)
   p = allocproc();
   initproc = p;
   
-  // allocate one user page and copy init's instructions
-  // and data into it.
-  uvminit(p->pagetable, initcode, sizeof(initcode));
-  p->sz = PGSIZE;
+  // 分配两页（0 和 0x1000）
+  p->sz = 2 * PGSIZE;
+  if (uvmalloc(p->pagetable, 0, p->sz) == 0)
+    panic("uvmalloc initcode");
 
-  // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = 0;      // user program counter
-  p->trapframe->sp = PGSIZE;  // user stack pointer
+  // 将 initcode 复制到第二页（虚拟地址 0x1000）
+  if (copyout(p->pagetable, PGSIZE, (char *)initcode, sizeof(initcode)) < 0)
+    panic("copyout initcode");
+
+  // 清除第一页的用户态访问权限（空指针保护）
+  uvmclear(p->pagetable, 0);
+
+  // 设置入口和栈指针
+  p->trapframe->epc = PGSIZE;        // 入口在 0x1000
+  p->trapframe->sp = p->sz;          // 栈顶在 0x2000
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  // copy user mappings to kernel page table
+  // 复制用户映射到内核页表（第一页没有 PTE_U）
   u2kvmcopy(p->kpgtbl, p->pagetable, 0, p->sz);
   p->state = RUNNABLE;
 
@@ -281,6 +288,7 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if (sz == 0) sz = PGSIZE;   // 跳过第一页
     if (sz + n > PLIC) return -1;
 
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {

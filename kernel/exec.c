@@ -68,6 +68,10 @@ exec(char *path, char **argv)
   p = myproc();
   oldsz = p->sz;   // 保存旧大小，用于清理内核页表
 
+  if (pagetable != 0) {
+    uvmclear(pagetable, 0);
+  }
+
   // Allocate two pages at the next page boundary.
   // Use the second as the user stack.
   sz = PGROUNDUP(sz);
