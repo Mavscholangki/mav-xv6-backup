@@ -15,6 +15,8 @@ struct proc *initproc;
 int nextpid = 1;
 struct spinlock pid_lock;
 
+int load_avg_scaled = 0;  // 初始为 0，缩放 10 倍
+
 extern void forkret(void);
 static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
@@ -42,6 +44,32 @@ procinit(void)
       p->kstack = va;
   }
   kvminithart();
+}
+
+void
+updateloadavg(void)
+{
+  int n = 0;
+  struct proc *p;
+
+  // 遍历进程表，统计处于运行或就绪状态的进程
+  acquire(&pid_lock);
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state == RUNNING || p->state == RUNNABLE) {
+      n++;
+    }
+  }
+  release(&pid_lock);
+
+  // 指数移动平均：new = (old * 9 + n * 10) / 10
+  // 相当于 time constant 约 1 分钟（对于 1s 采样间隔来说）
+  load_avg_scaled = (load_avg_scaled * 9 + n * 10) / 10;
+}
+
+int
+get_load_avg(void)
+{
+  return load_avg_scaled;
 }
 
 // Must be called with interrupts disabled,

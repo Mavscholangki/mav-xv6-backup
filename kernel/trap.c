@@ -77,8 +77,13 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    // 每 100 个 tick（即 1 秒）更新一次负载
+    if(++ticks % 100 == 0) {
+      updateloadavg();
+    }
     yield();
+  }
 
   usertrapret();
 }

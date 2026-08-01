@@ -120,6 +120,7 @@ sys_sysinfo(void)
   // 2. 填充数据（调用辅助函数）
   info.freemem = freemem_bytes();
   info.nproc = num_procs();
+  info.load_avg = get_load_avg();
   
   // 3. 将数据从内核态复制到用户态
   //    copyout(页表, 用户态目标地址, 内核态源地址, 数据大小)

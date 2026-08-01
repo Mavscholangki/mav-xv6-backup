@@ -168,13 +168,25 @@ syscall(void)
 
   num = p->trapframe->a7;
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+    // 在调用前，保存参数（a0~a5 为前 6 个参数，RISC-V 传参惯例）
+    uint64 args[6];
+    args[0] = p->trapframe->a0;
+    args[1] = p->trapframe->a1;
+    args[2] = p->trapframe->a2;
+    args[3] = p->trapframe->a3;
+    args[4] = p->trapframe->a4;
+    args[5] = p->trapframe->a5;
+
+    // 执行系统调用
     p->trapframe->a0 = syscalls[num]();
-    // 打印跟踪信息
-    if (p->trace_mask & (1 << num)) {
-      printf("%d: syscall %s -> %d\n", p->pid, syscall_names[num], p->trapframe->a0);
+
+    // 判断是否需要 trace
+    if((p->trace_mask & (1 << num)) != 0) {
+      printf("%d: syscall %s -> %d, args: %d %d %d %d %d %d\n",
+             p->pid, syscall_names[num], p->trapframe->a0,
+             args[0], args[1], args[2], args[3], args[4], args[5]);
     }
-  }
-  else {
+  } else {
     printf("%d %s: unknown sys call %d\n",
             p->pid, p->name, num);
     p->trapframe->a0 = -1;
