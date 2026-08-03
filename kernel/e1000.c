@@ -24,6 +24,15 @@ static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
 
+// TX software queue for challenge 1
+#define TX_SOFTQ_SIZE 32
+static struct mbuf *tx_softq[TX_SOFTQ_SIZE];
+static int tx_softq_head;
+static int tx_softq_tail;
+static struct spinlock tx_softq_lock;
+
+static void tx_refill(void);
+
 // called by pci_init().
 // xregs is the memory address at which the
 // e1000's registers are mapped.
@@ -37,6 +46,8 @@ e1000_init(uint32 *xregs)
   memset(tx_mbufs, 0, sizeof(tx_mbufs));
 
   initlock(&e1000_lock, "e1000");
+  initlock(&tx_softq_lock, "e1000_tx_softq");
+  tx_softq_head = tx_softq_tail = 0;
 
   regs = xregs;
 
@@ -97,6 +108,37 @@ e1000_init(uint32 *xregs)
   regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
   regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
+  // Enable transmit completion interrupt for challenge 1
+  regs[E1000_IMS] |= (1 << 1); // TXDW
+}
+
+static void
+tx_refill(void)
+{
+  // 必须持有 tx_lock
+  while (tx_softq_head != tx_softq_tail) {
+    int idx = regs[E1000_TDT] & (TX_RING_SIZE - 1);
+    if (!(tx_ring[idx].status & E1000_TXD_STAT_DD)) {
+      // 硬件环满，无法继续填充
+      break;
+    }
+    // 从软件队列取出一个 mbuf
+    struct mbuf *m = tx_softq[tx_softq_head];
+    tx_softq_head = (tx_softq_head + 1) % TX_SOFTQ_SIZE;
+    // 如果该槽位有旧 mbuf 残留
+    if (tx_mbufs[idx]) {
+      mbuffree(tx_mbufs[idx]);
+      tx_mbufs[idx] = 0;
+    }
+    // 填充描述符
+    tx_ring[idx].addr = (uint64)m->head;
+    tx_ring[idx].length = m->len;
+    tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+    tx_ring[idx].status = 0;
+    tx_mbufs[idx] = m;
+    // 更新 TDT
+    regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+  }
 }
 
 int
@@ -104,32 +146,18 @@ e1000_transmit(struct mbuf *m)
 {
   acquire(&tx_lock);
 
-  // 获取当前发送尾指针（硬件下次将读取的位置）
-  int idx = regs[E1000_TDT] & (TX_RING_SIZE - 1);
-
-  // 检查该描述符是否可用（硬件是否已完成之前的发送）
-  if (!(tx_ring[idx].status & E1000_TXD_STAT_DD)) {
+  // Enqueue the mbuf into software queue if not full.
+  int next_tail = (tx_softq_tail + 1) % TX_SOFTQ_SIZE;
+  if (next_tail == tx_softq_head) {
+    // Software queue full, drop the packet.
     release(&tx_lock);
-    return -1;   // 描述符忙，上层会释放 mbuf
+    return -1;
   }
+  tx_softq[tx_softq_tail] = m;
+  tx_softq_tail = next_tail;
 
-  // 如果该槽位还有未释放的 mbuf，释放它（理论上不应发生，但做保护）
-  if (tx_mbufs[idx]) {
-    mbuffree(tx_mbufs[idx]);
-    tx_mbufs[idx] = 0;
-  }
-
-  // 填充发送描述符
-  tx_ring[idx].addr = (uint64)m->head;
-  tx_ring[idx].length = m->len;
-  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;  // 包结束 & 报告状态
-  tx_ring[idx].status = 0;   // 清除状态（可选）
-
-  // 保存 mbuf，以便在发送完成后释放
-  tx_mbufs[idx] = m;
-
-  // 更新尾指针，通知硬件有新数据
-  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+  // Try to push as many queued mbufs as possible to the hardware ring.
+  tx_refill();
 
   release(&tx_lock);
   return 0;
@@ -178,10 +206,18 @@ e1000_recv(void)
 void
 e1000_intr(void)
 {
+  uint32 icr = regs[E1000_ICR];
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any
   // further interrupts.
   regs[E1000_ICR] = 0xffffffff;
 
-  e1000_recv();
+  if (icr & (1 << 7)) {
+    e1000_recv();
+  }
+  if (icr & (1 << 1)) {
+    acquire(&tx_lock);
+    tx_refill();
+    release(&tx_lock);
+  }
 }
