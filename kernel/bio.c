@@ -67,7 +67,7 @@ bget(uint dev, uint blockno)
   struct buf *b;
   int bucket = blockno % NBUCKET;
 
-  // 第一次查找
+  // 第一次查找：持桶锁，安全遍历
   acquire(&buckets[bucket].lock);
   for (b = buckets[bucket].head.next; b != &buckets[bucket].head; b = b->next) {
     if (b->dev == dev && b->blockno == blockno) {
@@ -80,10 +80,10 @@ bget(uint dev, uint blockno)
   }
   release(&buckets[bucket].lock);
 
-    // 未命中，需要替换
+  // 未命中，需要替换（以下路径持锁）
   acquire(&evict_lock);
 
-  // 第二次查找，防止其他进程已插入
+  // 第二次查找（持桶锁，防止其他进程已插入）
   acquire(&buckets[bucket].lock);
   for (b = buckets[bucket].head.next; b != &buckets[bucket].head; b = b->next) {
     if (b->dev == dev && b->blockno == blockno) {
@@ -132,12 +132,12 @@ bget(uint dev, uint blockno)
       acquire(&victim_bucket->lock);
     }
 
-    // 3. 再次检查 victim 是否仍可用（refcnt == 0）
-    if (victim->refcnt == 0) {
-      // 可用，跳出循环
+    // 3. 原子地将 victim->refcnt 从 0 改为 -1（表示正在淘汰）
+    if (__sync_val_compare_and_swap(&victim->refcnt, 0, -1) == 0) {
+      // 成功置为 -1，跳出循环
       break;
     } else {
-      // 不可用，释放锁，重试
+      // 失败，释放锁并重试
       if (victim_bucket == target_bucket) {
         release(&victim_bucket->lock);
       } else if (victim_bucket < target_bucket) {
@@ -151,7 +151,7 @@ bget(uint dev, uint blockno)
     }
   }
 
-  // 现在 victim 可用，且已持有必要的锁（可能两个或一个）
+  // 现在 victim 可用且 refcnt 已被置为 -1，已持有必要的锁
   // 从 victim_bucket 中移除 victim
   victim->prev->next = victim->next;
   victim->next->prev = victim->prev;
@@ -165,9 +165,10 @@ bget(uint dev, uint blockno)
   // 更新块信息
   victim->dev = dev;
   victim->blockno = blockno;
-  victim->refcnt = 1;
   victim->timestamp = ticks;
   victim->valid = 0;
+  // 将 refcnt 设为 1（表示新块已被引用）
+  __sync_lock_test_and_set(&victim->refcnt, 1);
 
   // 释放锁（逆序）
   if (victim_bucket == target_bucket) {
@@ -210,35 +211,29 @@ bwrite(struct buf *b)
 }
 
 // Release a locked buffer.
+// Now uses atomic operations and no bucket lock.
 void
 brelse(struct buf *b)
 {
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
-  int bucket = b->blockno % NBUCKET;
-  acquire(&buckets[bucket].lock);
-  b->refcnt--;
-  if (b->refcnt == 0) {
-    b->timestamp = ticks;
+  int new = __sync_fetch_and_sub(&b->refcnt, 1);
+  if (new == 0) {  // 原值 1，减后变为 0
+    b->timestamp = ticks;   // 非原子，可接受
   }
-  release(&buckets[bucket].lock);
 
   releasesleep(&b->lock);
 }
 
+// Increment reference count without locking.
 void
 bpin(struct buf *b) {
-  int bucket = b->blockno % NBUCKET;
-  acquire(&buckets[bucket].lock);
-  b->refcnt++;
-  release(&buckets[bucket].lock);
+  __sync_fetch_and_add(&b->refcnt, 1);
 }
 
+// Decrement reference count without locking.
 void
 bunpin(struct buf *b) {
-  int bucket = b->blockno % NBUCKET;
-  acquire(&buckets[bucket].lock);
-  b->refcnt--;
-  release(&buckets[bucket].lock);
+  __sync_fetch_and_sub(&b->refcnt, 1);
 }
