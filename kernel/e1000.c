@@ -107,7 +107,7 @@ e1000_init(uint32 *xregs)
   // ask e1000 for receive interrupts.
   regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
   regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
-  regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
+  regs[E1000_IMS] = (1 << 0) | (1 << 7); // RXDW -- Receiver Descriptor Write Back
   // Enable transmit completion interrupt for challenge 1
   regs[E1000_IMS] |= (1 << 1); // TXDW
 }
@@ -150,6 +150,7 @@ e1000_transmit(struct mbuf *m)
   int next_tail = (tx_softq_tail + 1) % TX_SOFTQ_SIZE;
   if (next_tail == tx_softq_head) {
     // Software queue full, drop the packet.
+    //printf("e1000_transmit: soft queue full, dropping\n");
     release(&tx_lock);
     return -1;
   }
@@ -168,10 +169,13 @@ e1000_recv(void)
 {
   acquire(&rx_lock);
 
-  // 当前尾指针指向最后已处理的描述符，下一个待处理的是 (RDT+1)
-  int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  uint32 rdt_val = regs[E1000_RDT];
+  //uint32 rdh_val = regs[E1000_RDH];
+  int idx = (rdt_val + 1) % RX_RING_SIZE;
+  //printf("e1000_recv: RDT=%d RDH=%d idx=%d status=%x\n", rdt_val, rdh_val, idx, rx_ring[idx].status);
 
   while (rx_ring[idx].status & E1000_RXD_STAT_DD) {
+    //printf("e1000_recv: processing idx=%d len=%d\n", idx, rx_ring[idx].length);
     struct mbuf *m = rx_mbufs[idx];
     if (!m) {
       panic("e1000_recv: no mbuf");
@@ -195,6 +199,12 @@ e1000_recv(void)
 
     // 更新 RDT 为当前已处理的描述符索引
     regs[E1000_RDT] = idx;
+    // 验证写入是否成功
+    uint32 check = regs[E1000_RDT];
+    if (check != idx) {
+      //printf("e1000_recv: RDT write failed, wrote %d got %d\n", idx, check);
+      regs[E1000_RDT] = idx; // 重试一次
+    }
 
     // 移动到下一个描述符
     idx = (idx + 1) % RX_RING_SIZE;
@@ -207,12 +217,13 @@ void
 e1000_intr(void)
 {
   uint32 icr = regs[E1000_ICR];
+  //printf("e1000_intr: icr=%x\n", icr);
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any
   // further interrupts.
   regs[E1000_ICR] = 0xffffffff;
 
-  if (icr & (1 << 7)) {
+  if (icr & ((1 << 0) | (1 << 7))) {
     e1000_recv();
   }
   if (icr & (1 << 1)) {
