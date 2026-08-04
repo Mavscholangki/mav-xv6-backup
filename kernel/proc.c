@@ -333,6 +333,7 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
+  //printf("exit: pid %d, sz=%p\n", p->pid, p->sz);
 
   if(p == initproc)
     panic("init exiting");

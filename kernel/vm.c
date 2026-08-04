@@ -107,8 +107,8 @@ walkaddr(pagetable_t pagetable, uint64 va)
     struct proc *p = myproc();
     if(p != 0 && p->pagetable == pagetable && va < p->sz) {
       uint64 stack_bottom = PGROUNDDOWN(p->trapframe->sp);
-      if(va >= stack_bottom - PGSIZE && va < stack_bottom + PGSIZE) {
-        // 保护页或栈页，不允许分配
+      if(va == stack_bottom - PGSIZE) {
+        // 保护页不允许分配
         return 0;
       }
       char *mem = kalloc();
@@ -392,8 +392,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0) {
     va0 = PGROUNDDOWN(dstva);
-    // 确保目标页可写（如果是 COW 页则处理）
-    if(cow_fault(pagetable, va0) != 0)
+    if(handle_user_page_fault(pagetable, va0, 1) != 0)   // 写操作
       return -1;
 
     pa0 = walkaddr(pagetable, va0);
@@ -510,4 +509,53 @@ int cow_fault(pagetable_t pagetable, uint64 va) {
   // 减少旧页引用
   kfree((void*)pa);
   return 0;
+}
+
+// 处理用户页错误（COW 或惰性分配）
+// 参数 write: 1 表示写操作，0 表示读操作
+// 返回 0 表示成功，-1 表示应杀死进程
+int
+handle_user_page_fault(pagetable_t pagetable, uint64 va, int write)
+{
+  if (va >= MAXVA)
+    return -1;
+  va = PGROUNDDOWN(va);
+
+  pte_t *pte = walk(pagetable, va, 0);
+  if (pte && (*pte & PTE_V)) {
+    // 页表项存在
+    if (*pte & PTE_COW) {
+      // COW 页：只有写操作才触发复制，读操作直接允许
+      if (write) {
+        return cow_fault(pagetable, va);
+      }
+      return 0;   // 读 COW 页无需处理
+    } else {
+      // 普通页：检查写权限
+      if (write && !(*pte & PTE_W)) {
+        return -1;   // 写只读页非法
+      }
+      return 0;
+    }
+  } else {
+    // 页表项不存在 -> 尝试惰性分配
+    struct proc *p = myproc();
+    if (p == 0 || p->pagetable != pagetable || va >= p->sz) {
+      return -1;
+    }
+    // 检查是否栈保护页（禁止分配）
+    uint64 stack_bottom = PGROUNDDOWN(p->trapframe->sp);
+    if (va == stack_bottom - PGSIZE) {   // 只禁止保护页
+      return -1;
+    }
+    char *mem = kalloc();
+    if (mem == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+    if (mappages(pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_U) != 0) {
+      kfree(mem);
+      return -1;
+    }
+    return 0;
+  }
 }

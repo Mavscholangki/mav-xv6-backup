@@ -53,18 +53,44 @@ sys_sbrk(void)
   if(newsz > MAXVA || (n > 0 && newsz < oldsz) || (n < 0 && newsz > oldsz))
     return -1;
   
+  struct proc *p = myproc();
+  
   if(n < 0) {
     // 缩小内存：释放从新大小到旧大小之间已映射的页
-    // 释放范围：[PGROUNDUP(newsz), PGROUNDUP(oldsz))
     uint64 start = PGROUNDUP(newsz);
     uint64 end = PGROUNDUP(oldsz);
     if(start < end) {
-      uvmunmap(myproc()->pagetable, start, (end - start) / PGSIZE, 1);
+      uvmunmap(p->pagetable, start, (end - start) / PGSIZE, 1);
     }
+    p->sz = newsz;
+    return oldsz;
+  } else if(n > 0) {
+    // 正向增长：立即分配物理页
+    uint64 a = PGROUNDUP(oldsz);
+    for(; a < newsz; a += PGSIZE) {
+      char *mem = kalloc();
+      if(mem == 0) {
+        // 分配失败，回滚已分配的页
+        if(a > PGROUNDUP(oldsz)) {
+          uvmunmap(p->pagetable, PGROUNDUP(oldsz), (a - PGROUNDUP(oldsz)) / PGSIZE, 1);
+        }
+        return -1;
+      }
+      memset(mem, 0, PGSIZE);
+      if(mappages(p->pagetable, a, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_U) != 0) {
+        kfree(mem);
+        if(a > PGROUNDUP(oldsz)) {
+          uvmunmap(p->pagetable, PGROUNDUP(oldsz), (a - PGROUNDUP(oldsz)) / PGSIZE, 1);
+        }
+        return -1;
+      }
+    }
+    p->sz = newsz;
+    return oldsz;
+  } else {
+    // n == 0
+    return oldsz;
   }
-  
-  myproc()->sz = newsz;
-  return oldsz;
 }
 
 uint64

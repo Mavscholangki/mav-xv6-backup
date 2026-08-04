@@ -53,42 +53,20 @@ usertrap(void)
     p->trapframe->epc += 4;
     intr_on();
     syscall();
-  } else if(r_scause() == 13 || r_scause() == 15) {
-    uint64 va = r_stval();
-    uint64 va_aligned = PGROUNDDOWN(va);
-    uint64 stack_bottom = PGROUNDDOWN(p->trapframe->sp);
-
-    if(va >= p->sz) {
-      p->killed = 1;
-    } else if(va >= stack_bottom - PGSIZE && va < stack_bottom + PGSIZE) {
-      // 保护页或栈页，杀死进程
-      p->killed = 1;
-    } else {
-      // 堆区，尝试惰性分配
-      pte_t *pte = walk(p->pagetable, va_aligned, 0);
-      if(pte && (*pte & PTE_V)) {
-        // 已经映射，无需操作
-      } else {
-        char *mem = kalloc();
-        if(mem == 0) {
-          p->killed = 1;
-        } else {
-          memset(mem, 0, PGSIZE);
-          if(mappages(p->pagetable, va_aligned, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U) != 0){
-            kfree(mem);
-            p->killed = 1;
-          }
-        }
-      }
-    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
     uint64 scause = r_scause();
-    if(scause == 15){    // store page fault
+    if(scause == 13 || scause == 15) {
       uint64 va = r_stval();
-      if(cow_fault(p->pagetable, va) != 0) {
+      int write = (scause == 15) ? 1 : 0;
+      if (write == 0) {
+        // 读缺页：直接杀死进程
         p->killed = 1;
+      } else {
+        if(handle_user_page_fault(p->pagetable, va, write) != 0) {
+            p->killed = 1;
+        }
       }
     } else {
       printf("usertrap(): unexpected scause %p pid=%d\n", scause, p->pid);
