@@ -447,6 +447,57 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  // Triple-indirect block
+  if(bn < NINDIRECT * NINDIRECT * NINDIRECT) {
+    uint idx1 = bn / (NINDIRECT * NINDIRECT);          // 在三级块中的索引 (0~255)
+    uint rem = bn % (NINDIRECT * NINDIRECT);
+    uint idx2 = rem / NINDIRECT;                       // 在二级块中的索引 (0~255)
+    uint idx3 = rem % NINDIRECT;                       // 在一级块中的索引 (0~255)
+
+    // 1. 获取或分配三级间接块 (存储在 ip->addrs[NDIRECT+2])
+    if((addr = ip->addrs[NDIRECT+2]) == 0) {
+      addr = balloc(ip->dev);
+      if(addr == 0) return 0;
+      ip->addrs[NDIRECT+2] = addr;
+    }
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 2. 获取或分配二级间接块 (由 idx1 指向)
+    if((addr = a[idx1]) == 0) {
+      addr = balloc(ip->dev);
+      if(addr == 0) { brelse(bp); return 0; }
+      a[idx1] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 3. 获取或分配一级间接块 (由 idx2 指向)
+    if((addr = a[idx2]) == 0) {
+      addr = balloc(ip->dev);
+      if(addr == 0) { brelse(bp); return 0; }
+      a[idx2] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 4. 获取或分配最终数据块 (由 idx3 指向)
+    if((addr = a[idx3]) == 0) {
+      addr = balloc(ip->dev);
+      if(addr == 0) { brelse(bp); return 0; }
+      a[idx3] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+    return addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -455,7 +506,7 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
+  int i, j, k;
   struct buf *bp, *bp2;
   uint *a, *a2;
 
@@ -499,6 +550,34 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT+1]);
     ip->addrs[NDIRECT+1] = 0;
+  }
+
+  // Free triple-indirect block
+  if(ip->addrs[NDIRECT+2]) {
+    bp = bread(ip->dev, ip->addrs[NDIRECT+2]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++) {
+      if(a[i]) {
+        struct buf *bp2 = bread(ip->dev, a[i]);
+        uint *a2 = (uint*)bp2->data;
+        for(j = 0; j < NINDIRECT; j++) {
+          if(a2[j]) {
+            struct buf *bp3 = bread(ip->dev, a2[j]);
+            uint *a3 = (uint*)bp3->data;
+            for(k = 0; k < NINDIRECT; k++) {
+              if(a3[k]) bfree(ip->dev, a3[k]);
+            }
+            brelse(bp3);
+            bfree(ip->dev, a2[j]);
+          }
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+2]);
+    ip->addrs[NDIRECT+2] = 0;
   }
 
   ip->size = 0;

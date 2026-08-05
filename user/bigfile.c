@@ -16,22 +16,18 @@ main()
     exit(-1);
   }
 
-  blocks = 0;
-  while(1){
-    *(int*)buf = blocks;
-    int cc = write(fd, buf, sizeof(buf));
-    if(cc <= 0)
-      break;
-    blocks++;
-    if (blocks % 100 == 0)
-      printf(".");
+  for (blocks = 0; blocks < 65803; blocks++) {
+      *(int*)buf = blocks;
+      int cc = write(fd, buf, sizeof(buf));
+      if (cc <= 0) {
+          printf("bigfile: write error at block %d\n", blocks);
+          exit(-1);
+      }
+      if (blocks % 100 == 0)
+          printf(".");
   }
 
   printf("\nwrote %d blocks\n", blocks);
-  if(blocks != 65803) {
-    printf("bigfile: file is too small\n");
-    exit(-1);
-  }
   
   close(fd);
   fd = open("big.file", O_RDONLY);

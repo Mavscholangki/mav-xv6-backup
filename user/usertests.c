@@ -569,6 +569,7 @@ writetest(char *s)
   }
 }
 
+#define WRITEBIG_BLOCKS (12 + 256)   // 原始最大值
 void
 writebig(char *s)
 {
@@ -580,7 +581,7 @@ writebig(char *s)
     exit(1);
   }
 
-  for(i = 0; i < MAXFILE; i++){
+  for(i = 0; i < WRITEBIG_BLOCKS; i++){
     ((int*)buf)[0] = i;
     if(write(fd, buf, BSIZE) != BSIZE){
       printf("%s: error: write big file failed\n", s, i);
@@ -600,7 +601,7 @@ writebig(char *s)
   for(;;){
     i = read(fd, buf, BSIZE);
     if(i == 0){
-      if(n == MAXFILE - 1){
+      if(n == WRITEBIG_BLOCKS - 1){
         printf("%s: read only %d blocks from big", s, n);
         exit(1);
       }
