@@ -86,6 +86,9 @@ OBJDUMP = $(TOOLPREFIX)objdump
 
 CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb
 
+# 基础目标文件（不含 symtab.o，因为它的生成需要先有临时内核）
+OBJS_BASE = $(OBJS)
+
 ifdef LAB
 LABUPPER = $(shell echo $(LAB) | tr a-z A-Z)
 XCFLAGS += -DSOL_$(LABUPPER) -DLAB_$(LABUPPER)
@@ -112,10 +115,28 @@ endif
 
 LDFLAGS = -z max-page-size=4096
 
-$K/kernel: $(OBJS) $K/kernel.ld $U/initcode
-	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) 
-	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
-	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
+# 第一阶段：构建一个临时内核（不含符号表），用于提取符号
+$K/kernel.tmp: $(OBJS_BASE) $K/kernel.ld $U/initcode
+	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $@ $(OBJS_BASE)
+
+# 第二阶段：用临时内核生成符号表源文件
+$K/symtab.c: $K/kernel.tmp
+	$(OBJDUMP) -t $< | awk '($$4 == ".text") {print "{0x" $$1 ", \"" $$NF "\"},"}' | sort -n > $@.tmp
+	echo "#include \"types.h\"" > $@
+	echo "struct symtab_entry { uint64 addr; char *name; }; struct symtab_entry symtab[] = {" >> $@
+	cat $@.tmp >> $@
+	echo "}; int symtab_len = sizeof(symtab)/sizeof(symtab[0]);" >> $@
+	rm $@.tmp
+
+# 编译符号表源文件
+$K/symtab.o: $K/symtab.c
+	$(CC) $(CFLAGS) -DHAVE_SYMTAB -c -o $@ $<
+
+# 最终内核：链接所有基础目标文件 + symtab.o
+$K/kernel: $(OBJS_BASE) $K/symtab.o $K/kernel.ld $U/initcode
+	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $@ $(OBJS_BASE) $K/symtab.o
+	$(OBJDUMP) -S $@ > $K/kernel.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
 
 $U/initcode: $U/initcode.S
 	$(CC) $(CFLAGS) -march=rv64g -nostdinc -I. -Ikernel -c $U/initcode.S -o $U/initcode.o
@@ -253,7 +274,8 @@ clean:
 	$U/initcode $U/initcode.out $K/kernel fs.img \
 	mkfs/mkfs .gdbinit \
         $U/usys.S \
-	$(UPROGS)
+	$(UPROGS) \
+	$K/kernel.tmp $K/symtab.c $K/symtab.o
 
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)

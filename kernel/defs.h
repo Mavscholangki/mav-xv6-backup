@@ -186,3 +186,7 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+struct symtab_entry { uint64 addr; char *name; };
+extern struct symtab_entry symtab[] __attribute__((weak));
+extern int symtab_len __attribute__((weak));

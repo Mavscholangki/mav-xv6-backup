@@ -133,17 +133,49 @@ printfinit(void)
   pr.locking = 1;
 }
 
+static char *
+find_symbol(uint64 addr, uint64 *offset)
+{
+  if (symtab_len == 0)        // 符号表尚未初始化或不存在
+    return 0;
+  
+  int lo = 0, hi = symtab_len - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (symtab[mid].addr == addr) {
+      *offset = 0;
+      return symtab[mid].name;
+    } else if (symtab[mid].addr < addr) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  // 返回最接近且小于等于 addr 的符号
+  if (hi >= 0) {
+    *offset = addr - symtab[hi].addr;
+    return symtab[hi].name;
+  }
+  return 0;
+}
+
 void
 backtrace(void)
 {
   uint64 fp = r_fp();
   uint64 top = PGROUNDUP(fp);
   uint64 bottom = PGROUNDDOWN(fp);
-  
+
   printf("backtrace:\n");
   while (fp >= bottom && fp < top) {
-    uint64 ra = *(uint64 *)(fp - 8);   // 返回地址在 fp-8
-    printf("%p\n", ra);
-    fp = *(uint64 *)(fp - 16);         // 上一帧指针在 fp-16
+    uint64 ra = *(uint64 *)(fp - 8);
+    uint64 offset;
+    char *name = find_symbol(ra, &offset);
+    if (name) {
+        printf("%s+%p\n", name, offset);
+    } else {
+      printf("%p\n", ra);
+    }
+    fp = *(uint64 *)(fp - 16);
   }
 }
