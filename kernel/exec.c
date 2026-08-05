@@ -20,6 +20,7 @@ exec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  uint64 oldsz;   // 保存旧进程大小，用于清理内核页表
 
   begin_op();
 
@@ -48,6 +49,9 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
+    // 检查是否超过限制
+    if(ph.vaddr + ph.memsz > PLIC)
+      goto bad;
     uint64 sz1;
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
@@ -62,11 +66,14 @@ exec(char *path, char **argv)
   ip = 0;
 
   p = myproc();
-  uint64 oldsz = p->sz;
+  oldsz = p->sz;   // 保存旧大小，用于清理内核页表
 
   // Allocate two pages at the next page boundary.
   // Use the second as the user stack.
   sz = PGROUNDUP(sz);
+  // 检查栈分配后是否超过 PLIC
+  if(sz + 2*PGSIZE > PLIC)
+    goto bad;
   uint64 sz1;
   if((sz1 = uvmalloc(pagetable, sz, sz + 2*PGSIZE)) == 0)
     goto bad;
@@ -114,8 +121,18 @@ exec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
+
+  // 同步内核页表中的用户映射
+  // 1. 清除旧内核页表中的用户映射
+  kvmclear_user(p->kpgtbl, 0, PLIC);
+  // 2. 复制新用户页表映射到内核页表
+  u2kvmcopy(p->kpgtbl, p->pagetable, 0, sz);
+
   proc_freepagetable(oldpagetable, oldsz);
 
+  if (p->pid == 1) {
+    vmprint(p->pagetable);
+  }
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

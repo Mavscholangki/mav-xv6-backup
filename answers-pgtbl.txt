@@ -1,0 +1,20 @@
+1. Explain the output of vmprint in terms of Fig 3-4 from the text.
+   该输出展示了 RISC-V Sv39 三级页表结构。
+   根页表（第2级）的条目对应虚拟地址的第38～30位。
+   在示例输出中，第0项和第255项为有效条目。
+   第0项指向一个第1级页表，该页表的第0项又指向一个第0级页表，而第0级页表包含了指向实际物理页的叶子PTE。
+   这与图3-4一致，即虚拟地址被划分为三个9位字段，分别作为三级页表的索引。
+
+2. What does page 0 contain? What is in page 2?
+   第0页（虚拟地址 0x0000）包含 initcode 程序的代码和数据（ELF 头部及指令）。
+   第2页（虚拟地址 0x2000）包含 init 进程的数据段，其中可能包括全局变量。
+
+3. When running in user mode, could the process read/write the memory mapped by page 1?
+   根据 vmprint 的输出，第1页（最末级索引为1）的 PTE 位为 0x00f，该 PTE 中未设置 PTE_U 位，因此不允许用户态访问。
+   所以，该进程无法读写第1页。（若输出中 U 位被置位，则允许访问。）
+
+4. Why is the third test `srcva + len < srcva` necessary in copyin_new()?
+   该检查用于检测整数溢出。
+   若 srcva 接近最大地址且 len 较大，则 srcva + len 可能发生回绕变成一个很小的值（例如 0xFFFFFFFFFFFFF000 + 0x1000 = 0x0）。
+   前两个检查（srcva >= p->sz 和 srcva+len >= p->sz）无法捕获这种溢出，因为回绕后的结果可能小于 p->sz，因此需要第三个检查来确保未发生溢出。
+   示例：srcva = 0xFFFFFFFFFFFFF000，len = 0x1000 → srcva+len = 0x0，该值小于 p->sz，只有第三个检查能发现此问题。
