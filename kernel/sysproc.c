@@ -60,6 +60,7 @@ sys_sbrk(void)
     uint64 end = PGROUNDUP(oldsz);
     if(start < end) {
       uvmunmap(myproc()->pagetable, start, (end - start) / PGSIZE, 1);
+      kvmclear_user(myproc()->kpgtbl, start, end);
     }
   }
   

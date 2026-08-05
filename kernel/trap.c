@@ -171,6 +171,55 @@ kerneltrap()
   if(intr_get() != 0)
     panic("kerneltrap: interrupts enabled");
 
+  // 处理内核态访问用户地址时发生的缺页（用于 lazy allocation + simple copyin）
+  if (scause == 13 || scause == 15) {
+    struct proc *p = myproc();
+    uint64 va = r_stval();
+    if (p != 0 && va < p->sz && va < CLINT) {
+      // 排除栈区域（栈已映射，不应缺页）
+      uint64 stack_bottom = PGROUNDDOWN(p->trapframe->sp);
+      if (!(va >= stack_bottom - PGSIZE && va < stack_bottom + PGSIZE)) {
+        uint64 va_aligned = PGROUNDDOWN(va);
+        // 检查用户页表是否已有映射
+        pte_t *pte = walk(p->pagetable, va_aligned, 0);
+        if (pte != 0 && (*pte & PTE_V)) {
+          // 用户页表已映射，但内核页表可能未映射
+          // 检查内核页表是否已映射，若未映射则建立映射
+          pte_t *kpte = walk(p->kpgtbl, va_aligned, 0);
+          if (kpte == 0 || (*kpte & PTE_V) == 0) {
+            uint64 pa = PTE2PA(*pte);
+            uint flags = PTE_FLAGS(*pte) & ~PTE_U; // 内核页表不需要 U 位
+            if (mappages(p->kpgtbl, va_aligned, PGSIZE, pa, flags) != 0)
+              panic("kerneltrap: mappages kernel for existing user page failed");
+          }
+          // 映射建立完成，返回重新执行
+          return;
+        } else {
+          // 用户页表未映射，进行惰性分配
+          char *mem = kalloc();
+          if (mem == 0) {
+            panic("kerneltrap: lazy alloc failed");
+          }
+          memset(mem, 0, PGSIZE);
+          // 映射到用户页表
+          if (mappages(p->pagetable, va_aligned, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_U) != 0) {
+            kfree(mem);
+            panic("kerneltrap: mappages user failed");
+          }
+          // 映射到内核页表
+          if (mappages(p->kpgtbl, va_aligned, PGSIZE, (uint64)mem, PTE_W|PTE_R) != 0) {
+            // 回退：清除用户映射，释放物理页
+            uvmunmap(p->pagetable, va_aligned, 1, 1);
+            panic("kerneltrap: mappages kernel failed");
+          }
+          // 分配完成，返回重新执行
+          return;
+        }
+      }
+    }
+    // 非法地址或不合法情况，继续下面的处理（通常会 panic）
+  }
+
   if((which_dev = devintr()) == 0){
     printf("scause %p\n", scause);
     printf("sepc=%p stval=%p\n", r_sepc(), r_stval());

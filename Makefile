@@ -37,12 +37,12 @@ OBJS = \
   $K/plic.o \
   $K/virtio_disk.o
 
-ifeq ($(LAB),pgtbl)
+ifeq ($(LAB),$(filter $(LAB), pgtbl lazy))
 OBJS += \
 	$K/vmcopyin.o
 endif
 
-ifeq ($(LAB),$(filter $(LAB), pgtbl lock))
+ifeq ($(LAB),$(filter $(LAB), pgtbl lock lazy))
 OBJS += \
 	$K/stats.o\
 	$K/sprintf.o

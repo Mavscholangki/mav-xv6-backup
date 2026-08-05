@@ -32,7 +32,7 @@ copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   struct proc *p = myproc();
 
-  if (srcva >= p->sz || srcva+len >= p->sz || srcva+len < srcva)
+  if (srcva >= p->sz || srcva+len > p->sz || srcva+len < srcva)
     return -1;
   if (srcva + len > CLINT)   // 不允许访问高于 CLINT 的地址
     return -1;
