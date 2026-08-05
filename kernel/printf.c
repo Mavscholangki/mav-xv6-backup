@@ -172,7 +172,8 @@ backtrace(void)
     uint64 offset;
     char *name = find_symbol(ra, &offset);
     if (name) {
-        printf("%s+%p\n", name, offset);
+        //printf("%s+%p\n", name, offset);
+        printf("%p\n", ra);
     } else {
       printf("%p\n", ra);
     }
