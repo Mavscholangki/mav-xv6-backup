@@ -23,11 +23,38 @@ struct {
   struct run *freelist;
 } kmem;
 
+uint refcnt[(PHYSTOP - KERNBASE) / PGSIZE];
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
+}
+
+void
+incref(void *pa)
+{
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  acquire(&kmem.lock);
+  if(refcnt[idx] == 0) panic("incref on freed page");
+  refcnt[idx]++;
+  release(&kmem.lock);
+}
+
+void
+decref(void *pa)
+{
+  int idx = ((uint64)pa - KERNBASE) / PGSIZE;
+  acquire(&kmem.lock);
+  if(refcnt[idx] == 0) panic("decref zero");
+  refcnt[idx]--;
+  if(refcnt[idx] == 0) {
+    release(&kmem.lock);
+    kfree(pa);           // 真正释放，kfree 会再次 acquire 锁，但锁已释放
+  } else {
+    release(&kmem.lock);
+  }
 }
 
 void
@@ -72,11 +99,12 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r) {
     kmem.freelist = r->next;
+    int idx = ((uint64)r - KERNBASE) / PGSIZE;
+    refcnt[idx] = 1;          // 新分配页引用计数为 1
+  }
   release(&kmem.lock);
-
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  if(r) memset((char*)r, 5, PGSIZE);
   return (void*)r;
 }

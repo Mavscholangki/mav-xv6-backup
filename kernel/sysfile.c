@@ -574,15 +574,13 @@ sys_munmap(void)
   addr = PGROUNDDOWN(addr);
   length = PGROUNDUP(length);
   uint64 end = addr + length;
-  if (end > MAXVA || end < addr) return -1; // 溢出检查
+  if (end > MAXVA || end < addr) return -1;
 
-  // 遍历 VMA，找到覆盖该范围的 VMA
+  // 查找完全覆盖此范围的 VMA（必须是单个 VMA，且只能从开头或结尾解除）
   int found_vma = -1;
   for (int i = 0; i < NVMA; i++) {
     if (p->vmas[i].valid && addr >= p->vmas[i].start && end <= p->vmas[i].end) {
-      // 只处理从开头或结尾解除的情况
-      // 检查是否是从开头解除（addr == start）或从结尾解除（end == end）或全部
-      if (addr == p->vmas[i].start || end == p->vmas[i].end || 
+      if (addr == p->vmas[i].start || end == p->vmas[i].end ||
           (addr == p->vmas[i].start && end == p->vmas[i].end)) {
         found_vma = i;
         break;
@@ -592,26 +590,21 @@ sys_munmap(void)
   if (found_vma == -1) return -1;
 
   struct vma *v = &p->vmas[found_vma];
-  
-  // 如果是 MAP_SHARED 且可写，需要将修改写回文件
+
+  // 写回 MAP_SHARED 且可写的脏页
   if ((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)) {
-    // 遍历该区域已映射的页，写入文件
     for (uint64 va = addr; va < end; va += PGSIZE) {
       pte_t *pte = walk(p->pagetable, va, 0);
       if (pte && (*pte & PTE_V)) {
-        // 读取物理地址
         uint64 pa = PTE2PA(*pte);
-        // 分配临时内核缓冲区
         char *buf = kalloc();
-        if (buf == 0) continue; // 或 panic
-        // 拷贝用户数据到内核
+        if (buf == 0) continue;   // 跳过，但理论上不会
         memmove(buf, (char*)pa, PGSIZE);
-        // 写入文件
-        uint64 file_off = v->offset + (va - v->start);
+        uint64 off = v->offset + (va - v->start);
         struct inode *ip = v->file->ip;
         begin_op();
         ilock(ip);
-        writei(ip, 0, (uint64)buf, file_off, PGSIZE);
+        writei(ip, 0, (uint64)buf, off, PGSIZE);
         iunlock(ip);
         end_op();
         kfree(buf);
@@ -619,31 +612,28 @@ sys_munmap(void)
     }
   }
 
-  // 解除映射并释放物理页（只解除该范围）
+  // 解除映射（清除页表项并减少物理页引用计数）
   for (uint64 va = addr; va < end; va += PGSIZE) {
     pte_t *pte = walk(p->pagetable, va, 0);
     if (pte && (*pte & PTE_V)) {
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
-      *pte = 0; // 清除 PTE
+      decref((void*)pa);   // 使用引用计数释放
+      *pte = 0;            // 清除 PTE
     }
   }
-  // 刷新 TLB
-  sfence_vma();
+  sfence_vma();  // 刷新 TLB
 
-  // 更新 VMA
+  // 更新或删除 VMA
   if (addr == v->start && end == v->end) {
     // 完全解除
     v->valid = 0;
     fileclose(v->file);
   } else if (addr == v->start) {
-    // 从开头解除：调整 start
     v->start = end;
   } else if (end == v->end) {
-    // 从末尾解除：调整 end
     v->end = addr;
   } else {
-    // 中间挖洞（理论上不会发生），但我们不支持，返回错误
+    // 中间挖洞（不支持）
     return -1;
   }
 

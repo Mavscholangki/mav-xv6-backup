@@ -282,7 +282,7 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz, p) < 0) { // 传入父进程指针
     freeproc(np);
     release(&np->lock);
     return -1;
@@ -359,66 +359,51 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
-  struct vma vmas_copy[NVMA];
-  int nvma = 0;
-
-  // Copy valid VMA entries out of proc structure
-  acquire(&p->lock);
+    // ---------- 处理 mmap VMA ----------
   for(int i = 0; i < NVMA; i++){
     if(p->vmas[i].valid){
-      vmas_copy[nvma++] = p->vmas[i];
-    }
-  }
-  release(&p->lock);
+      struct vma *v = &p->vmas[i];
 
-  // For each mmap region: write back shared writable pages,
-  // then unmap all pages and release physical memory,
-  // then close the file.
-  for(int i = 0; i < nvma; i++){
-    struct vma *v = &vmas_copy[i];
+      // 写回 MAP_SHARED 且可写的页
+      if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+        for(uint64 va = v->start; va < v->end; va += PGSIZE){
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V)){
+            uint64 pa = PTE2PA(*pte);
+            char *buf = kalloc();
+            if(buf){
+              memmove(buf, (char*)pa, PGSIZE);
+              uint64 off = v->offset + (va - v->start);
+              struct inode *ip = v->file->ip;
+              begin_op();
+              ilock(ip);
+              writei(ip, 0, (uint64)buf, off, PGSIZE);
+              iunlock(ip);
+              end_op();
+              kfree(buf);
+            }
+          }
+        }
+      }
 
-    // Write back shared writable pages
-    if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+      // 解除映射（清除 PTE 并递减引用计数）
       for(uint64 va = v->start; va < v->end; va += PGSIZE){
         pte_t *pte = walk(p->pagetable, va, 0);
         if(pte && (*pte & PTE_V)){
           uint64 pa = PTE2PA(*pte);
-          char *buf = kalloc();
-          if(buf){
-            memmove(buf, (char*)pa, PGSIZE);
-            uint64 off = v->offset + (va - v->start);
-            struct inode *ip = v->file->ip;
-            begin_op();
-            ilock(ip);
-            writei(ip, 0, (uint64)buf, off, PGSIZE);
-            iunlock(ip);
-            end_op();
-            kfree(buf);
-          }
+          decref((void*)pa);   // 减少引用计数，可能释放物理页
+          *pte = 0;
         }
       }
+
+      // 关闭文件
+      fileclose(v->file);
+
+      // 标记无效
+      v->valid = 0;
     }
-
-    // Unmap all pages and free physical memory
-    for(uint64 va = v->start; va < v->end; va += PGSIZE){
-      pte_t *pte = walk(p->pagetable, va, 0);
-      if(pte && (*pte & PTE_V)){
-        uint64 pa = PTE2PA(*pte);
-        kfree((void*)pa);
-        *pte = 0;   // clear PTE
-      }
-    }
-
-    // Close the file (decrease reference count)
-    fileclose(v->file);
   }
-
-  // Mark all VMA entries as invalid
-  acquire(&p->lock);
-  for(int i = 0; i < NVMA; i++){
-    p->vmas[i].valid = 0;
-  }
-  release(&p->lock);
+  sfence_vma();  // 刷新 TLB
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -776,4 +761,13 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+struct vma*
+vma_for_addr(struct proc *p, uint64 va) {
+  for(int i=0; i<NVMA; i++) {
+    if(p->vmas[i].valid && va >= p->vmas[i].start && va < p->vmas[i].end)
+      return &p->vmas[i];
+  }
+  return 0;
 }
