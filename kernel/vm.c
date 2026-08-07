@@ -172,10 +172,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+    pte = walk(pagetable, a, 0);
+    if(pte == 0)
+      continue;                     // 页表不存在，跳过
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;                     // 页面未映射，跳过
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -306,24 +307,26 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz, struct proc *parent)
   char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
+    pte = walk(old, i, 0);
+    if(pte == 0)
       panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    if((*pte & PTE_V) == 0){
+      // 页未映射（惰性区域），跳过
+      continue;
+    }
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
 
-    // 判断是否为 MAP_SHARED mmap 页
+    // 判断是否为 MAP_SHARED mmap 页（原有的共享逻辑）
     struct vma *v = vma_for_addr(parent, i);
     if(v && (v->flags & MAP_SHARED)) {
-      // 共享物理页
       incref((void*)pa);
       if(mappages(new, i, PGSIZE, pa, flags) != 0) {
-        decref((void*)pa);   // 回滚
+        decref((void*)pa);
         goto err;
       }
     } else {
-      // 原有复制逻辑
+      // 复制物理页（适用于堆及其他）
       if((mem = kalloc()) == 0)
         goto err;
       memmove(mem, (char*)pa, PGSIZE);
@@ -360,12 +363,19 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  struct proc *p = myproc();  // 获取当前进程
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      // 尝试处理缺页（仅当有进程上下文且地址在 VMA 内）
+      if(p && handle_page_fault(p, va0) == 0){
+        pa0 = walkaddr(pagetable, va0);
+      }
+      if(pa0 == 0)
+        return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -385,12 +395,18 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+  struct proc *p = myproc();
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      if(p && handle_page_fault(p, va0) == 0){
+        pa0 = walkaddr(pagetable, va0);
+      }
+      if(pa0 == 0)
+        return -1;
+    }
     n = PGSIZE - (srcva - va0);
     if(n > len)
       n = len;
@@ -412,28 +428,34 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
   uint64 n, va0, pa0;
   int got_null = 0;
+  struct proc *p = myproc();
 
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      if(p && handle_page_fault(p, va0) == 0){
+        pa0 = walkaddr(pagetable, va0);
+      }
+      if(pa0 == 0)
+        return -1;
+    }
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
+    char *paddr = (char *)(pa0 + (srcva - va0));
     while(n > 0){
-      if(*p == '\0'){
+      if(*paddr == '\0'){
         *dst = '\0';
         got_null = 1;
         break;
       } else {
-        *dst = *p;
+        *dst = *paddr;
       }
       --n;
       --max;
-      p++;
+      paddr++;
       dst++;
     }
 

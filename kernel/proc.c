@@ -257,13 +257,73 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
-      return -1;
+    uint64 new_sz = sz + n;
+    // 查找已有的堆 VMA
+    struct vma *heap_vma = 0;
+    for(int i = 0; i < NVMA; i++){
+      if(p->vmas[i].valid && p->vmas[i].type == VMA_HEAP){
+        heap_vma = &p->vmas[i];
+        break;
+      }
     }
+    if(heap_vma == 0){
+      // 没有堆 VMA，创建新的
+      for(int i = 0; i < NVMA; i++){
+        if(!p->vmas[i].valid){
+          heap_vma = &p->vmas[i];
+          heap_vma->valid = 1;
+          heap_vma->type = VMA_HEAP;
+          heap_vma->start = sz;
+          heap_vma->end = new_sz;
+          heap_vma->prot = PROT_READ | PROT_WRITE;
+          heap_vma->flags = 0;
+          heap_vma->file = 0;
+          heap_vma->offset = 0;
+          break;
+        }
+      }
+      if(heap_vma == 0) return -1;  // 无可用 VMA 槽
+    } else {
+      // 扩展已有堆 VMA（假设它是连续的）
+      if(heap_vma->end == sz){
+        heap_vma->end = new_sz;
+      } else {
+        // 不连续（例如之前有 munmap 在中间），创建新 VMA
+        for(int i = 0; i < NVMA; i++){
+          if(!p->vmas[i].valid){
+            heap_vma = &p->vmas[i];
+            heap_vma->valid = 1;
+            heap_vma->type = VMA_HEAP;
+            heap_vma->start = sz;
+            heap_vma->end = new_sz;
+            heap_vma->prot = PROT_READ | PROT_WRITE;
+            heap_vma->flags = 0;
+            heap_vma->file = 0;
+            heap_vma->offset = 0;
+            break;
+          }
+        }
+        if(heap_vma == 0) return -1;
+      }
+    }
+    p->sz = new_sz;
   } else if(n < 0){
+    // 收缩：使用 uvmdealloc 解除映射并释放物理页
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    p->sz = sz;
+    // 调整或删除堆 VMA
+    for(int i = 0; i < NVMA; i++){
+      if(p->vmas[i].valid && p->vmas[i].type == VMA_HEAP){
+        if(p->vmas[i].start >= sz){
+          // 整个 VMA 都在新 sz 之外，无效
+          p->vmas[i].valid = 0;
+        } else {
+          // 部分保留，缩短 end
+          p->vmas[i].end = sz;
+        }
+      }
+    }
   }
-  p->sz = sz;
   return 0;
 }
 
@@ -293,7 +353,8 @@ fork(void)
   for(i = 0; i < NVMA; i++){
     if(p->vmas[i].valid){
       np->vmas[i] = p->vmas[i];
-      filedup(np->vmas[i].file);   // increment reference count for the file
+      if(p->vmas[i].type == VMA_FILE)   // 仅文件映射需要 filedup
+        filedup(np->vmas[i].file);
     }
   }
 
@@ -359,49 +420,47 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
-    // ---------- 处理 mmap VMA ----------
+  // 处理 mmap VMA（仅文件映射）
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].valid){
-      struct vma *v = &p->vmas[i];
+        if(p->vmas[i].valid && p->vmas[i].type == VMA_FILE){
+            struct vma *v = &p->vmas[i];
 
-      // 写回 MAP_SHARED 且可写的页
-      if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
-        for(uint64 va = v->start; va < v->end; va += PGSIZE){
-          pte_t *pte = walk(p->pagetable, va, 0);
-          if(pte && (*pte & PTE_V)){
-            uint64 pa = PTE2PA(*pte);
-            char *buf = kalloc();
-            if(buf){
-              memmove(buf, (char*)pa, PGSIZE);
-              uint64 off = v->offset + (va - v->start);
-              struct inode *ip = v->file->ip;
-              begin_op();
-              ilock(ip);
-              writei(ip, 0, (uint64)buf, off, PGSIZE);
-              iunlock(ip);
-              end_op();
-              kfree(buf);
+            // 写回 MAP_SHARED 且可写的页
+            if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+                for(uint64 va = v->start; va < v->end; va += PGSIZE){
+                    pte_t *pte = walk(p->pagetable, va, 0);
+                    if(pte && (*pte & PTE_V)){
+                        uint64 pa = PTE2PA(*pte);
+                        char *buf = kalloc();
+                        if(buf){
+                            memmove(buf, (char*)pa, PGSIZE);
+                            uint64 off = v->offset + (va - v->start);
+                            struct inode *ip = v->file->ip;
+                            begin_op();
+                            ilock(ip);
+                            writei(ip, 0, (uint64)buf, off, PGSIZE);
+                            iunlock(ip);
+                            end_op();
+                            kfree(buf);
+                        }
+                    }
+                }
             }
-          }
+
+            // 解除文件映射（清除 PTE 并递减引用计数）
+            for(uint64 va = v->start; va < v->end; va += PGSIZE){
+                pte_t *pte = walk(p->pagetable, va, 0);
+                if(pte && (*pte & PTE_V)){
+                    uint64 pa = PTE2PA(*pte);
+                    decref((void*)pa);
+                    *pte = 0;
+                }
+            }
+
+            // 关闭文件
+            fileclose(v->file);
+            v->valid = 0;   // 标记无效（可选）
         }
-      }
-
-      // 解除映射（清除 PTE 并递减引用计数）
-      for(uint64 va = v->start; va < v->end; va += PGSIZE){
-        pte_t *pte = walk(p->pagetable, va, 0);
-        if(pte && (*pte & PTE_V)){
-          uint64 pa = PTE2PA(*pte);
-          decref((void*)pa);   // 减少引用计数，可能释放物理页
-          *pte = 0;
-        }
-      }
-
-      // 关闭文件
-      fileclose(v->file);
-
-      // 标记无效
-      v->valid = 0;
-    }
   }
   sfence_vma();  // 刷新 TLB
 
@@ -770,4 +829,49 @@ vma_for_addr(struct proc *p, uint64 va) {
       return &p->vmas[i];
   }
   return 0;
+}
+
+// 清理进程的所有 VMA（文件映射），用于 exit 和 exec
+void
+vma_cleanup(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].valid){
+      struct vma *v = &p->vmas[i];
+
+      // 若为文件映射且为 MAP_SHARED 可写，则写回
+      if(v->type == VMA_FILE && (v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+        for(uint64 va = v->start; va < v->end; va += PGSIZE){
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V)){
+            uint64 pa = PTE2PA(*pte);
+            char *buf = kalloc();
+            if(buf){
+              memmove(buf, (char*)pa, PGSIZE);
+              uint64 off = v->offset + (va - v->start);
+              struct inode *ip = v->file->ip;
+              begin_op();
+              ilock(ip);
+              writei(ip, 0, (uint64)buf, off, PGSIZE);
+              iunlock(ip);
+              end_op();
+              kfree(buf);
+            }
+          }
+        }
+      }
+
+      // 解除所有映射（使用 uvmunmap 清除 VMA 范围内的所有页）
+      uint64 npages = (v->end - v->start) / PGSIZE;
+      uvmunmap(p->pagetable, v->start, npages, 1);
+
+      // 若是文件映射，关闭文件
+      if(v->type == VMA_FILE){
+        fileclose(v->file);
+      }
+
+      v->valid = 0;
+    }
+  }
+  sfence_vma();
 }

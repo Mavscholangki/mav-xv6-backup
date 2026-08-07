@@ -552,6 +552,7 @@ sys_mmap(void)
 
   // 填充 VMA
   v->valid = 1;
+  v->type = VMA_FILE;
   v->start = start;
   v->end = start + length;
   v->length = length;

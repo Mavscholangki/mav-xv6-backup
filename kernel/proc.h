@@ -84,8 +84,12 @@ enum procstate { UNUSED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 #define NVMA 16
 
+#define VMA_FILE  1
+#define VMA_HEAP  2
+
 struct vma {
   int valid;          // 1 表示该条目有效
+  int type;
   uint64 start;       // 起始虚拟地址（页对齐）
   uint64 end;         // 结束虚拟地址（独占，页对齐）
   uint64 length;      // 原始长度（字节），用于 munmap 边界检查

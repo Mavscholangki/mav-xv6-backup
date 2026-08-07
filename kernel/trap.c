@@ -21,58 +21,50 @@ void kernelvec();
 extern int devintr();
 
 // 返回 0 表示成功，-1 表示失败
-int handle_mmap_fault(struct proc *p, uint64 va) {
+int handle_page_fault(struct proc *p, uint64 va) {
   va = PGROUNDDOWN(va);
-  
-  // 查找包含 va 的 VMA
-  struct vma *v = 0;
-  for (int i = 0; i < NVMA; i++) {
-    if (p->vmas[i].valid && va >= p->vmas[i].start && va < p->vmas[i].end) {
-      v = &p->vmas[i];
-      break;
+  struct vma *v = vma_for_addr(p, va);
+  if(v == 0) return -1;
+
+  // 检查写权限：scause==15 为 store
+  if(r_scause() == 15 && !(v->prot & PROT_WRITE))
+    return -1;
+
+  if(v->type == VMA_FILE) {
+    // 原有文件映射逻辑（保持不变）
+    uint64 file_off = v->offset + (va - v->start);
+    char *mem = kalloc();
+    if(mem == 0) return -1;
+    struct inode *ip = v->file->ip;
+    ilock(ip);
+    int n = readi(ip, 0, (uint64)mem, file_off, PGSIZE);
+    iunlock(ip);
+    if(n < 0) {
+      kfree(mem);
+      return -1;
     }
+    if(n < PGSIZE) memset(mem + n, 0, PGSIZE - n);
+    int pte_flags = PTE_U | PTE_V;
+    if(v->prot & PROT_READ) pte_flags |= PTE_R;
+    if(v->prot & PROT_WRITE) pte_flags |= PTE_W;
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, pte_flags) != 0) {
+      kfree(mem);
+      return -1;
+    }
+    return 0;
+  } else if(v->type == VMA_HEAP) {
+    // 分配一页零页
+    char *mem = kalloc();
+    if(mem == 0) return -1;
+    memset(mem, 0, PGSIZE);
+    int pte_flags = PTE_U | PTE_V | PTE_R | PTE_W;  // 堆可读可写
+    if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, pte_flags) != 0) {
+      kfree(mem);
+      return -1;
+    }
+    return 0;
   }
-  if (v == 0) return -1;
-
-  // 计算文件偏移（假设 offset=0）
-  uint64 file_off = v->offset + (va - v->start);
-
-  // 检查权限：如果是写操作（scause=15）但映射只读，则失败
-  if (r_scause() == 15 && !(v->prot & PROT_WRITE))
-    return -1;
-
-  // 分配物理页
-  char *mem = kalloc();
-  if (mem == 0)
-    return -1;
-
-  // 从文件读取数据
-  struct inode *ip = v->file->ip;
-  ilock(ip);
-  int n = readi(ip, 0, (uint64)mem, file_off, PGSIZE);
-  iunlock(ip);
-
-  if (n < 0) {
-    kfree(mem);
-    return -1;
-  }
-  // 如果读取字节不足一页，将剩余部分置零
-  if (n < PGSIZE) {
-    memset(mem + n, 0, PGSIZE - n);
-  }
-
-  // 设置页表权限
-  int pte_flags = PTE_U | PTE_V;
-  if (v->prot & PROT_READ) pte_flags |= PTE_R;
-  if (v->prot & PROT_WRITE) pte_flags |= PTE_W;
-  // 注意：对于 MAP_SHARED 写，我们需要允许写，并且写回时依赖 D 位，但实验不强制检查D，所以直接写回所有页。
-
-  if (mappages(p->pagetable, va, PGSIZE, (uint64)mem, pte_flags) != 0) {
-    kfree(mem);
-    return -1;
-  }
-
-  return 0;
+  return -1;
 }
 
 void
@@ -131,7 +123,7 @@ usertrap(void)
       p->killed = 1;
     } else {
       // attempt to handle mmap fault
-      if(handle_mmap_fault(p, va) != 0) {
+      if(handle_page_fault(p, va) != 0) {
         p->killed = 1;
       }
     }
