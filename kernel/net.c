@@ -54,23 +54,22 @@ net_init(void)
   net_initialized = 1;
 }
 
-static uint8*
-arp_lookup(uint32 ip)
+static int
+arp_lookup(uint32 ip, uint8 *out_mac)  // 返回1表示找到，0表示未找到
 {
   acquire(&arp_lock);
   for (int i = 0; i < ARP_CACHE_SIZE; i++) {
     if (arp_cache[i].valid && arp_cache[i].ip == ip) {
       if (ticks - arp_cache[i].last_seen < ARP_TIMEOUT) {
+        memmove(out_mac, arp_cache[i].mac, ETHADDR_LEN);
         release(&arp_lock);
-        return arp_cache[i].mac;
+        return 1;
       } else {
-        // 超时，标记失效
         arp_cache[i].valid = 0;
       }
     }
   }
   release(&arp_lock);
-  //printf("arp_lookup HIT: ip=%x\n", ip);
   return 0;
 }
 
@@ -399,15 +398,12 @@ net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
   }
 
   // 尝试查找 ARP 缓存（使用下一跳 IP）
-  uint8 *dmac = arp_lookup(nexthop);
-  //printf("net_tx_ip: dmac=%p\n", dmac);
-  if (dmac) {
-    //printf("net_tx_ip: send directly\n");
-    net_tx_eth(m, ETHTYPE_IP, dmac);
+  uint8 dmac[ETHADDR_LEN];
+  if (arp_lookup(nexthop, dmac)) {
+      net_tx_eth(m, ETHTYPE_IP, dmac);
   } else {
-    //printf("net_tx_ip: send ARP request and pend\n");
-    net_tx_arp(ARP_OP_REQUEST, broadcast_mac, nexthop);
-    pending_add(m, nexthop); // 存储下一跳 IP，用于匹配 ARP 响应
+      pending_add(m, nexthop);
+      net_tx_arp(ARP_OP_REQUEST, broadcast_mac, nexthop);
   }
 }
 
