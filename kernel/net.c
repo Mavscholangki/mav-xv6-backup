@@ -12,8 +12,8 @@
 #include "defs.h"
 
 #define ARP_CACHE_SIZE 16
-#define ARP_TIMEOUT    300      // 30 秒 (ticks)
-#define PENDING_TIMEOUT 100     // 挂起包最长等待 10 秒
+#define ARP_TIMEOUT    3000      // 30 秒 (ticks)
+#define PENDING_TIMEOUT 1000     // 挂起包最长等待 10 秒
 
 static uint32 gateway_ip = MAKE_IP_ADDR(10, 0, 2, 2);
 

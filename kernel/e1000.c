@@ -221,7 +221,7 @@ e1000_intr(void)
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any
   // further interrupts.
-  regs[E1000_ICR] = 0xffffffff;
+  regs[E1000_ICR] = icr;
 
   if (icr & ((1 << 0) | (1 << 7))) {
     e1000_recv();

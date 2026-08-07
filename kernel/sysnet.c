@@ -23,13 +23,23 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-static struct spinlock lock;
-static struct sock *sockets;
+#define SOCK_HASH_SIZE 17
+static struct spinlock locks[SOCK_HASH_SIZE];
+static struct sock *sock_hash[SOCK_HASH_SIZE];
+
+static int
+sock_hash_idx(uint16 lport)
+{
+    return lport % SOCK_HASH_SIZE;
+}
 
 void
 sockinit(void)
 {
-  initlock(&lock, "socktbl");
+  for (int i = 0; i < SOCK_HASH_SIZE; i++) {
+    initlock(&locks[i], "sockhash");
+  }
+  memset(sock_hash, 0, sizeof(sock_hash));
 }
 
 int
@@ -55,21 +65,21 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   (*f)->writable = 1;
   (*f)->sock = si;
 
-  // add to list of sockets
-  acquire(&lock);
-  pos = sockets;
-  while (pos) {
+    // add to hash table
+  int idx = sock_hash_idx(lport);
+  acquire(&locks[idx]);
+  // Check for duplicate within the same bucket.
+  for (pos = sock_hash[idx]; pos; pos = pos->next) {
     if (pos->raddr == raddr &&
         pos->lport == lport &&
-	pos->rport == rport) {
-      release(&lock);
+        pos->rport == rport) {
+      release(&locks[idx]);
       goto bad;
     }
-    pos = pos->next;
   }
-  si->next = sockets;
-  sockets = si;
-  release(&lock);
+  si->next = sock_hash[idx];
+  sock_hash[idx] = si;
+  release(&locks[idx]);
   return 0;
 
 bad:
@@ -86,17 +96,18 @@ sockclose(struct sock *si)
   struct sock **pos;
   struct mbuf *m;
 
-  // remove from list of sockets
-  acquire(&lock);
-  pos = &sockets;
+  // remove from hash table
+  int idx = sock_hash_idx(si->lport);
+  acquire(&locks[idx]);
+  pos = &sock_hash[idx];
   while (*pos) {
-    if (*pos == si){
+    if (*pos == si) {
       *pos = si->next;
       break;
     }
     pos = &(*pos)->next;
   }
-  release(&lock);
+  release(&locks[idx]);
 
   // free any pending mbufs
   while (!mbufq_empty(&si->rxq)) {
@@ -158,28 +169,20 @@ sockwrite(struct sock *si, uint64 addr, int n)
 void
 sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
 {
-  //
-  // Find the socket that handles this mbuf and deliver it, waking
-  // any sleeping reader. Free the mbuf if there are no sockets
-  // registered to handle it.
-  //
   struct sock *si;
+  int idx = sock_hash_idx(lport);
 
-  acquire(&lock);
-  si = sockets;
-  while (si) {
-    if (si->raddr == raddr && si->lport == lport && si->rport == rport)
-      goto found;
-    si = si->next;
+  acquire(&locks[idx]);
+  for (si = sock_hash[idx]; si; si = si->next) {
+    if (si->raddr == raddr && si->lport == lport && si->rport == rport) {
+      acquire(&si->lock);
+      mbufq_pushtail(&si->rxq, m);
+      wakeup(&si->rxq);
+      release(&si->lock);
+      release(&locks[idx]);
+      return;
+    }
   }
-  release(&lock);
+  release(&locks[idx]);
   mbuffree(m);
-  return;
-
-found:
-  acquire(&si->lock);
-  mbufq_pushtail(&si->rxq, m);
-  wakeup(&si->rxq);
-  release(&si->lock);
-  release(&lock);
 }
