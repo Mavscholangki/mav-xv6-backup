@@ -26,6 +26,10 @@ int sleep(int);
 int uptime(void);
 #ifdef LAB_NET
 int connect(uint32, uint16, uint16);
+int socket(void);
+int bind(int fd, int port);
+int sendto(int fd, void *buf, int len, uint32 *raddr, uint16 rport);
+int recvfrom(int fd, void *buf, int len, uint32 *raddr, uint16 *rport);
 #endif
 
 // ulib.c

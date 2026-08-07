@@ -30,3 +30,7 @@
 #define SYS_mmap   27
 #define SYS_munmap 28
 #define SYS_connect 29
+#define SYS_socket  30
+#define SYS_bind    31
+#define SYS_sendto  32
+#define SYS_recvfrom 33

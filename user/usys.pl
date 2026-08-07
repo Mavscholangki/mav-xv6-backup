@@ -37,3 +37,7 @@ entry("sbrk");
 entry("sleep");
 entry("uptime");
 entry("connect");
+entry("socket");
+entry("bind");
+entry("sendto");
+entry("recvfrom");

@@ -106,6 +106,10 @@ extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
 #ifdef LAB_NET
 extern uint64 sys_connect(void);
+extern uint64 sys_socket(void);
+extern uint64 sys_bind(void);
+extern uint64 sys_sendto(void);
+extern uint64 sys_recvfrom(void);
 #endif
 
 static uint64 (*syscalls[])(void) = {
@@ -132,6 +136,10 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 #ifdef LAB_NET
 [SYS_connect] sys_connect,
+[SYS_socket]   sys_socket,
+[SYS_bind]     sys_bind,
+[SYS_sendto]   sys_sendto,
+[SYS_recvfrom] sys_recvfrom,
 #endif
 };
 
