@@ -22,6 +22,10 @@ static struct mbuf *rx_mbufs[RX_RING_SIZE];
 // remember where the e1000's registers live.
 static volatile uint32 *regs;
 
+static int rx_polling = 0;          // 是否处于轮询模式
+static int rx_work_pending = 0;     // 是否有未处理的包
+#define RX_POLL_LIMIT 8             // 每次轮询最多处理的包数
+
 struct spinlock e1000_lock;
 
 // TX software queue for challenge 1
@@ -168,20 +172,11 @@ void
 e1000_recv(void)
 {
   acquire(&rx_lock);
-
-  uint32 rdt_val = regs[E1000_RDT];
-  //uint32 rdh_val = regs[E1000_RDH];
-  int idx = (rdt_val + 1) % RX_RING_SIZE;
-  //printf("e1000_recv: RDT=%d RDH=%d idx=%d status=%x\n", rdt_val, rdh_val, idx, rx_ring[idx].status);
-
+  int idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  int count = 0;
   while (rx_ring[idx].status & E1000_RXD_STAT_DD) {
-    //printf("e1000_recv: processing idx=%d len=%d\n", idx, rx_ring[idx].length);
     struct mbuf *m = rx_mbufs[idx];
-    if (!m) {
-      panic("e1000_recv: no mbuf");
-    }
-
-    // 设置接收到的数据长度
+    if (!m) panic("e1000_recv: no mbuf");
     m->len = rx_ring[idx].length;
 
     // 将数据包交给网络协议栈（net_rx 会负责最终释放 mbuf）
@@ -195,21 +190,17 @@ e1000_recv(void)
     }
     rx_mbufs[idx] = new_m;
     rx_ring[idx].addr = (uint64)new_m->head;
-    rx_ring[idx].status = 0;   // 清除状态，使硬件可以再次使用
-
-    // 更新 RDT 为当前已处理的描述符索引
+    rx_ring[idx].status = 0;
     regs[E1000_RDT] = idx;
-    // 验证写入是否成功
-    uint32 check = regs[E1000_RDT];
-    if (check != idx) {
-      //printf("e1000_recv: RDT write failed, wrote %d got %d\n", idx, check);
-      regs[E1000_RDT] = idx; // 重试一次
-    }
-
-    // 移动到下一个描述符
     idx = (idx + 1) % RX_RING_SIZE;
+    count++;
+    if (rx_polling && count >= RX_POLL_LIMIT) break;
   }
-
+  // 检查是否还有未处理的包（即下一个描述符的 DD 是否置位）
+  if (rx_ring[idx].status & E1000_RXD_STAT_DD)
+    rx_work_pending = 1;
+  else
+    rx_work_pending = 0;
   release(&rx_lock);
 }
 
@@ -217,18 +208,38 @@ void
 e1000_intr(void)
 {
   uint32 icr = regs[E1000_ICR];
-  //printf("e1000_intr: icr=%x\n", icr);
-  // tell the e1000 we've seen this interrupt;
-  // without this the e1000 won't raise any
-  // further interrupts.
   regs[E1000_ICR] = icr;
 
   if (icr & ((1 << 0) | (1 << 7))) {
+    // 接收中断
+    if (!rx_polling) {
+      // 关闭接收中断，进入轮询模式
+      regs[E1000_IMS] &= ~((1 << 0) | (1 << 7));
+      rx_polling = 1;
+    }
     e1000_recv();
+    if (!rx_work_pending) {
+      // 没有更多包，退出轮询，重新开启中断
+      rx_polling = 0;
+      regs[E1000_IMS] |= ((1 << 0) | (1 << 7));
+    }
   }
+
   if (icr & (1 << 1)) {
+    // 发送完成中断
     acquire(&tx_lock);
     tx_refill();
     release(&tx_lock);
+  }
+}
+
+void
+e1000_poll_tick(void)
+{
+  if (!rx_polling) return;
+  e1000_recv();
+  if (!rx_work_pending) {
+    rx_polling = 0;
+    regs[E1000_IMS] |= ((1 << 0) | (1 << 7)); // 重新开启接收中断
   }
 }

@@ -167,6 +167,7 @@ clockintr()
 {
   acquire(&tickslock);
   ticks++;
+  e1000_poll_tick();
   wakeup(&ticks);
   release(&tickslock);
 }
