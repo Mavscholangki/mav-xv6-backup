@@ -23,6 +23,8 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
   uint32 last_raddr;   // 最后收到的远程 IP
   uint16 last_rport;   // 最后收到的远程端口
+  int icmp_err;        // 最后一次 ICMP 错误码（如 0=无错误，3=端口不可达）
+  int icmp_err_valid;  // 是否有未读错误
 };
 
 #define SOCK_HASH_SIZE 17
@@ -211,6 +213,8 @@ uint64 sys_socket(void) {
     si->next = 0;
     si->last_raddr = 0;
     si->last_rport = 0;
+    si->icmp_err = 0;
+    si->icmp_err_valid = 0;
 
     if ((f = filealloc()) == 0) {
         kfree(si);
@@ -340,6 +344,13 @@ uint64 sys_recvfrom(void) {
 
     // 等待数据到达
     acquire(&si->lock);
+    if (si->icmp_err_valid) {
+        int err = si->icmp_err;
+        si->icmp_err_valid = 0;
+        si->icmp_err = 0;
+        release(&si->lock);
+        return -err;
+    }
     while (mbufq_empty(&si->rxq) && !p->killed) {
         sleep(&si->rxq, &si->lock);
     }
@@ -367,4 +378,24 @@ uint64 sys_recvfrom(void) {
     }
     mbuffree(m);
     return read_len;
+}
+
+void
+sock_set_icmp_error(uint32 raddr, uint16 lport, uint16 rport, int err)
+{
+  int idx = sock_hash_idx(lport);
+  acquire(&locks[idx]);
+  for (struct sock *si = sock_hash[idx]; si; si = si->next) {
+    if (si->lport == lport &&
+        (si->raddr == 0 || si->raddr == raddr) &&
+        (si->rport == 0 || si->rport == rport)) {
+      acquire(&si->lock);
+      si->icmp_err = err;
+      si->icmp_err_valid = 1;
+      wakeup(&si->rxq);
+      release(&si->lock);
+      break;
+    }
+  }
+  release(&locks[idx]);
 }

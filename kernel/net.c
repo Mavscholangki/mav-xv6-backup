@@ -506,6 +506,32 @@ fail:
   mbuffree(m);
 }
 
+struct icmp {
+    uint8 type;
+    uint8 code;
+    uint16 checksum;
+};
+#define ICMP_TYPE_DEST_UNREACH 3
+
+static void
+net_rx_icmp(struct mbuf *m)
+{
+  struct icmp *icmp = mbufpullhdr(m, *icmp);
+  if (!icmp || (icmp->type != ICMP_TYPE_DEST_UNREACH && icmp->type != 11))
+      goto done;
+  // 负载包含原始 IP 头 + UDP 头（至少 8 字节）
+  if (m->len < sizeof(struct ip) + sizeof(struct udp))
+      goto done;
+  struct ip *orig_ip = (struct ip*)m->head;
+  struct udp *orig_udp = (struct udp*)((char*)orig_ip + sizeof(struct ip));
+  uint32 raddr = ntohl(orig_ip->ip_src);
+  uint16 lport = ntohs(orig_udp->dport);   // xv6 监听的端口
+  uint16 rport = ntohs(orig_udp->sport);
+  sock_set_icmp_error(raddr, lport, rport, icmp->code);
+done:
+  mbuffree(m);
+}
+
 // receives an IP packet
 static void
 net_rx_ip(struct mbuf *m)
@@ -529,13 +555,18 @@ net_rx_ip(struct mbuf *m)
   // is the packet addressed to us?
   if (htonl(iphdr->ip_dst) != local_ip)
     goto fail;
-  // can only support UDP
-  if (iphdr->ip_p != IPPROTO_UDP)
-    goto fail;
 
-  len = ntohs(iphdr->ip_len) - sizeof(*iphdr);
-  net_rx_udp(m, len, iphdr);
-  return;
+  // 支持 UDP 和 ICMP
+  if (iphdr->ip_p == IPPROTO_UDP) {
+    len = ntohs(iphdr->ip_len) - sizeof(*iphdr);
+    net_rx_udp(m, len, iphdr);
+    return;
+  } else if (iphdr->ip_p == IPPROTO_ICMP) {
+    net_rx_icmp(m);
+    return;
+  }
+  // 其他协议不支持
+  goto fail;
 
 fail:
   mbuffree(m);
