@@ -116,6 +116,33 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
+// 返回 L1 页表项的指针（不进入 L0），用于大页映射。
+// 如果 alloc==1 且 L2 页表项不存在，则分配 L1 页表。
+// 如果 L1 页表项无效，则直接返回其指针，由调用者设置大页叶子。
+static pte_t *
+walk_to_l1(pagetable_t pagetable, uint64 va, int alloc)
+{
+  if (va >= MAXVA)
+    panic("walk_to_l1");
+
+  // Level 2
+  pte_t *pte = &pagetable[PX(2, va)];
+  if (!(*pte & PTE_V)) {
+    if (!alloc)
+      return 0;
+    if ((pagetable = (pde_t*)kalloc()) == 0)
+      return 0;
+    memset(pagetable, 0, PGSIZE);
+    *pte = PA2PTE(pagetable) | PTE_V;
+  } else {
+    pagetable = (pagetable_t)PTE2PA(*pte);
+  }
+
+  // Level 1
+  // 直接返回 L1 的 PTE 指针，即使它无效（调用者会设置它为大页叶子）
+  return &pagetable[PX(1, va)];
+}
+
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -139,14 +166,21 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+int mappages_huge(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm);
 // add a mapping to the given page table.
 // only used when booting and for per-process kernel page tables.
 // does not flush TLB or enable paging.
 void
-kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)  // MODIFIED signature
+kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
 {
-  if(mappages(pagetable, va, sz, pa, perm) != 0)   // MODIFIED: use parameter
-    panic("kvmmap");
+  // 检查是否满足大页条件（仅当所有地址和大小都 2MiB 对齐）
+  if ((va % HUGE_PGSIZE == 0) && (pa % HUGE_PGSIZE == 0) && (sz % HUGE_PGSIZE == 0) && sz > 0) {
+    if (mappages_huge(pagetable, va, sz, pa, perm) != 0)
+      panic("kvmmap: huge");
+  } else {
+    if (mappages(pagetable, va, sz, pa, perm) != 0)
+      panic("kvmmap");
+  }
 }
 
 // Copy user page table mappings from upgtbl to kernel page table kpgtbl
@@ -238,6 +272,27 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
       break;
     a += PGSIZE;
     pa += PGSIZE;
+  }
+  return 0;
+}
+
+// 映射大页（2 MiB 对齐），仅用于内核页表。
+// va, pa 必须 2 MiB 对齐，size 必须 2 MiB 的整数倍。
+// 成功返回 0，失败返回 -1。
+int
+mappages_huge(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+{
+  if (va % HUGE_PGSIZE != 0 || pa % HUGE_PGSIZE != 0 || size % HUGE_PGSIZE != 0)
+    panic("mappages_huge: unaligned");
+
+  for (uint64 a = va; a < va + size; a += HUGE_PGSIZE) {
+    pte_t *pte = walk_to_l1(pagetable, a, 1);
+    if (pte == 0)
+      return -1;
+    if (*pte & PTE_V)
+      panic("mappages_huge: remap");
+    *pte = PA2PTE(pa) | perm | PTE_V;
+    pa += HUGE_PGSIZE;
   }
   return 0;
 }
