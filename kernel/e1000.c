@@ -176,11 +176,24 @@ e1000_recv(void)
   int count = 0;
   while (rx_ring[idx].status & E1000_RXD_STAT_DD) {
     struct mbuf *m = rx_mbufs[idx];
-    if (!m) panic("e1000_recv: no mbuf");
-    m->len = rx_ring[idx].length;
+    uint8 errors = rx_ring[idx].errors;
 
-    // 将数据包交给网络协议栈（net_rx 会负责最终释放 mbuf）
-    net_rx(m);
+    // 只有明确出现 IP 校验和错误时才丢弃
+    if (errors & E1000_RXD_ERR_IPE) {
+      mbuffree(m);
+      // 分配新 mbuf 并继续
+      struct mbuf *new_m = mbufalloc(0);
+      if (!new_m) panic("e1000_recv: mbufalloc failed");
+      rx_mbufs[idx] = new_m;
+      rx_ring[idx].addr = (uint64)new_m->head;
+      rx_ring[idx].status = 0;
+      regs[E1000_RDT] = idx;
+      idx = (idx + 1) % RX_RING_SIZE;
+      continue;
+    }
+
+    m->len = rx_ring[idx].length;
+    net_rx(m);  // 交给网络栈
 
     // 分配新的 mbuf 替换已用掉的
     struct mbuf *new_m = mbufalloc(0);

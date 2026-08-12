@@ -111,6 +111,11 @@ struct tx_desc
 /* Receive Descriptor bit definitions [E1000 3.2.3.1] */
 #define E1000_RXD_STAT_DD       0x01    /* Descriptor Done */
 #define E1000_RXD_STAT_EOP      0x02    /* End of Packet */
+#define E1000_RXD_STAT_IPCS     0x10    /* IP 校验和通过 */
+#define E1000_RXD_STAT_TCPCS    0x20    /* TCP/UDP 校验和通过 */
+#define E1000_RXD_STAT_IPCS_MASK 0x10   /* 用于检查错误 */
+#define E1000_RXD_ERR_IPE       0x08   /* IP Checksum Error */
+#define E1000_RXD_ERR_TCPE      0x10   /* TCP/UDP Checksum Error */
 
 // [E1000 3.2.3]
 struct rx_desc

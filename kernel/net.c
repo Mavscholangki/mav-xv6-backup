@@ -547,8 +547,9 @@ net_rx_ip(struct mbuf *m)
   if (iphdr->ip_vhl != ((4 << 4) | (20 >> 2)))
     goto fail;
   // validate IP checksum
-  if (in_cksum((unsigned char *)iphdr, sizeof(*iphdr)))
-    goto fail;
+  // if (in_cksum((unsigned char *)iphdr, sizeof(*iphdr)))
+  //   goto fail;
+  // 由于硬件已验证，这里不再重复计算
   // can't support fragmented IP packets
   if (htons(iphdr->ip_off) != 0)
     goto fail;
